@@ -34,6 +34,19 @@ jobs:
         run: |
           mkdir -p tests/flaxspeaker_tflm_probe/main
           cp build/flaxspeaker-audit/int8/model_int8.tflite tests/flaxspeaker_tflm_probe/main/model_int8.tflite
+      - name: Fetch pinned TFLite schema header
+        run: |
+          rm -rf /tmp/tflite-micro
+          mkdir -p /tmp/tflite-micro
+          cd /tmp/tflite-micro
+          git init
+          git remote add origin https://github.com/tensorflow/tflite-micro.git
+          git config core.sparseCheckout true
+          git sparse-checkout set tensorflow/lite/schema
+          git fetch --depth 1 origin ff8cff73024a520a6549c412cbd3c673a839c22a
+          git checkout --detach FETCH_HEAD
+          mkdir -p "$GITHUB_WORKSPACE/tests/flaxspeaker_tflm_probe/compat/tensorflow/lite/schema"
+          cp tensorflow/lite/schema/schema_generated.h "$GITHUB_WORKSPACE/tests/flaxspeaker_tflm_probe/compat/tensorflow/lite/schema/schema_generated.h"
       - name: Build ESP32-S3 probe
         working-directory: tests/flaxspeaker_tflm_probe
         run: |
