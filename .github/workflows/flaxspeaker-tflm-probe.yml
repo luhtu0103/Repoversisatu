@@ -30,13 +30,13 @@ jobs:
           python3 -m pip install --break-system-packages --upgrade huggingface_hub tflite
       - name: Audit pinned model exports
         run: python3 scripts/audit_flaxspeaker_tflite_exports.py --output-dir build/flaxspeaker-audit
-      - name: Report model operators against probe resolver
+      - name: Report FP32 model operators against probe resolver
         run: |
-          python3 scripts/report_flaxspeaker_tflm_ops.py build/flaxspeaker-audit/model_int8/model_int8.tflite --output build/flaxspeaker-audit/flaxspeaker_tflm_ops_report.json
-      - name: Stage INT8 model for firmware build
+          python3 scripts/report_flaxspeaker_tflm_ops.py build/flaxspeaker-audit/model_fp32/model_fp32.tflite --output build/flaxspeaker-audit/flaxspeaker_tflm_ops_report.json
+      - name: Stage FP32 baseline model for firmware build
         run: |
           mkdir -p tests/flaxspeaker_tflm_probe/main
-          cp build/flaxspeaker-audit/model_int8/model_int8.tflite tests/flaxspeaker_tflm_probe/main/model_int8.tflite
+          cp build/flaxspeaker-audit/model_fp32/model_fp32.tflite tests/flaxspeaker_tflm_probe/main/model_fp32.tflite
       - name: Fetch pinned TFLite schema header
         run: |
           rm -rf /tmp/tflite-micro
