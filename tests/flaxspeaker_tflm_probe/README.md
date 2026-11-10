@@ -4,7 +4,7 @@ ESP32-S3 runtime smoke test for the FlaxSpeaker TFLite Micro model.
 
 ## Model requirement
 
-Place the verified model artifact at `main/model_int8.tflite` before building. The probe expects input `float32[1,180,80]` and output `float32[1,192]`. A different tensor contract must be investigated rather than bypassed.
+CI stages the pinned FP32 export as main/model_fp32.tflite before building. The probe expects input float32[1,180,80] and output float32[1,192]. The INT8 export currently fails during AllocateTensors() because its FULLY_CONNECTED node mixes FLOAT32 input with INT8 weights in a path rejected by the tested runtime. The FP32 export is the baseline compatibility test; it avoids changing quantization or model weights.
 
 ## Build
 
