@@ -6,7 +6,11 @@ This is an isolated test application. It does not add TFLite Micro or FlaxSpeake
 
 ## Automated CI gate
 
-The workflow downloads the pinned INT8 artifact from the audited Hugging Face revision, copies it into the isolated probe project, and builds the probe using ESP-IDF 6.0.1 and espressif/esp-tflite-micro 1.4.2. The build gate checks that the dependency and probe source compile for ESP32-S3. It is not a hardware inference result.
+The workflow downloads both exports from the pinned Hugging Face revision and stages the FP32 export in the isolated probe. The probe builds using ESP-IDF 6.0.1 and espressif/esp-tflite-micro 1.4.2. Build success checks compilation only; it is not a hardware inference result.
+
+## Why FP32 first
+
+The INT8 export failed on hardware during AllocateTensors() at FULLY_CONNECTED: the runtime reported `Input type: FLOAT32 with filter type : INT8 not supported.` This is a hybrid-quantization compatibility issue, not a flash or PSRAM detection failure. The next test uses the FP32 export as a baseline, avoiding an unvalidated change to quantization or accuracy. The FP32 model may increase firmware size and inference memory/latency; CI and hardware results must confirm it fits.
 
 ## Hardware test
 
@@ -21,10 +25,10 @@ The test embeds the model in the test app and requests a 4 MiB PSRAM arena. Actu
 
 ## CI dependency notes
 
-The probe component explicitly declares its direct ESP-IDF dependencies (`esp_timer`, `heap`, and `log`) alongside `esp-tflite-micro`. It uses `MicroMutableOpResolver` and explicitly registers built-in ops instead of relying on an all-ops resolver. This may expose unsupported graph operators during `AllocateTensors()`; it does not claim the complete FlaxSpeaker graph is supported.
+The probe component explicitly declares its direct ESP-IDF dependencies (esp_timer, heap, and log) alongside esp-tflite-micro. It uses MicroMutableOpResolver and explicitly registers built-in ops instead of relying on an all-ops resolver. This may expose unsupported graph operators during AllocateTensors(); it does not claim the complete FlaxSpeaker graph is supported.
 
-The Espressif component package may not expose `tensorflow/lite/schema/schema_generated.h`. CI therefore fetches only that generated header from a pinned TensorFlow Lite Micro commit into the test-only compatibility include directory. This is a build-system workaround, not proof that the model's operators are supported.
+The Espressif component package may not expose tensorflow/lite/schema/schema_generated.h. CI therefore fetches only that generated header from a pinned TensorFlow Lite Micro commit into the test-only compatibility include directory. This is a build-system workaround, not proof that the model's operators are supported.
 
 ## Automated operator inventory
 
-CI emits a static operator inventory for the pinned INT8 model. It lists operator counts and compares them with operators explicitly registered by the isolated probe. The report is diagnostic and does not fail the build merely because unsupported operators are found; the exact list determines the next engineering step. A clean list still does not replace a real ESP32-S3 `AllocateTensors()` and `Invoke()` test.
+CI emits a static operator inventory for the pinned FP32 model. It lists operator counts and compares them with operators explicitly registered by the isolated probe. A clean list still does not replace a real ESP32-S3 AllocateTensors() and Invoke() test.
