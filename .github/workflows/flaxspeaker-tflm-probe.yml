@@ -23,13 +23,16 @@ jobs:
     container: espressif/idf:v6.0.1
     steps:
       - uses: actions/checkout@v4
-      - name: Install audit dependencies
-        run: python -m pip install --upgrade huggingface_hub tflite
+      - name: Install pip and audit dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3-pip
+          python3 -m pip install --break-system-packages --upgrade huggingface_hub tflite
       - name: Audit pinned model exports
-        run: python scripts/audit_flaxspeaker_tflite_exports.py --output-dir build/flaxspeaker-audit
+        run: python3 scripts/audit_flaxspeaker_tflite_exports.py --output-dir build/flaxspeaker-audit
       - name: Report model operators against probe resolver
         run: |
-          python scripts/report_flaxspeaker_tflm_ops.py build/flaxspeaker-audit/int8/model_int8.tflite --output build/flaxspeaker-audit/flaxspeaker_tflm_ops_report.json
+          python3 scripts/report_flaxspeaker_tflm_ops.py build/flaxspeaker-audit/int8/model_int8.tflite --output build/flaxspeaker-audit/flaxspeaker_tflm_ops_report.json
       - name: Stage INT8 model for firmware build
         run: |
           mkdir -p tests/flaxspeaker_tflm_probe/main
