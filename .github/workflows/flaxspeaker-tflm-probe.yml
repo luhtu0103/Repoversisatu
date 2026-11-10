@@ -1,0 +1,47 @@
+name: FlaxSpeaker ESP32-S3 TFLM Probe
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "tests/flaxspeaker_tflm_probe/**"
+      - "scripts/audit_flaxspeaker_tflite_exports.py"
+      - "scripts/inspect_speaker_tflite.py"
+      - ".github/workflows/flaxspeaker-tflm-probe.yml"
+  pull_request:
+    paths:
+      - "tests/flaxspeaker_tflm_probe/**"
+      - "scripts/audit_flaxspeaker_tflite_exports.py"
+      - "scripts/inspect_speaker_tflite.py"
+      - ".github/workflows/flaxspeaker-tflm-probe.yml"
+
+jobs:
+  build-probe:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.4.2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install audit dependencies
+        run: python -m pip install --upgrade huggingface_hub tflite
+      - name: Audit pinned model exports
+        run: python scripts/audit_flaxspeaker_tflite_exports.py --output-dir build/flaxspeaker-audit
+      - name: Stage INT8 model for firmware build
+        run: |
+          mkdir -p tests/flaxspeaker_tflm_probe/main
+          cp build/flaxspeaker-audit/int8/model_int8.tflite tests/flaxspeaker_tflm_probe/main/model_int8.tflite
+      - name: Build ESP32-S3 probe
+        working-directory: tests/flaxspeaker_tflm_probe
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py set-target esp32s3
+          idf.py build
+      - name: Upload build and audit artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flaxspeaker-tflm-probe
+          path: |
+            tests/flaxspeaker_tflm_probe/build/*.bin
+            tests/flaxspeaker_tflm_probe/build/*.elf
+            build/flaxspeaker-audit/flaxspeaker_tflite_audit_manifest.json
+          if-no-files-found: warn
