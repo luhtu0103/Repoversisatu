@@ -60,7 +60,7 @@ jobs:
         working-directory: tests/flaxspeaker_tflm_probe
         run: |
           . "$IDF_PATH/export.sh"
-          idf.py merge-bin -o build/flaxspeaker_tflm_probe_merged.bin
+          idf.py merge-bin -o flaxspeaker_tflm_probe_merged.bin
       - name: Upload build and audit artifacts
         if: always()
         uses: actions/upload-artifact@v4
