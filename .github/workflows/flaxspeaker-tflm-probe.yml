@@ -61,10 +61,13 @@ jobs:
         run: |
           . "$IDF_PATH/export.sh"
           idf.py merge-bin -o flaxspeaker_tflm_probe_merged.bin
-      - name: Upload app-only firmware for ESPFlash
+      - name: Upload only three firmware files for ESPFlash
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: flaxspeaker-probe-app-only
-          path: tests/flaxspeaker_tflm_probe/build/flaxspeaker_tflm_probe.bin
+          name: flaxspeaker-probe-flash-files
+          path: |
+            tests/flaxspeaker_tflm_probe/build/bootloader/bootloader.bin
+            tests/flaxspeaker_tflm_probe/build/partition_table/partition-table.bin
+            tests/flaxspeaker_tflm_probe/build/flaxspeaker_tflm_probe.bin
           if-no-files-found: error
