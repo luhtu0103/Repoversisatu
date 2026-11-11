@@ -8,7 +8,10 @@ idf_component_register(
         "websocket_tx.cpp"
         "websocket_tool.cpp"
         "websocket_stack_wrap.c"
-    INCLUDE_DIRS "include"
+
+    INCLUDE_DIRS
+        "include"
+
     REQUIRES
         esp_websocket_client
         esp-tls
@@ -23,6 +26,7 @@ idf_component_register(
         ai_memory
         servo_head
 )
+
 target_link_libraries(${COMPONENT_LIB} INTERFACE
     "-Wl,--wrap=esp_websocket_client_init"
 )
