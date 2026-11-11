@@ -93,13 +93,13 @@ def main():
 
     pairs = []
     for offset, filename in flash_files.items():
+        # The model image is staged separately by the workflow; flasher metadata
+        # may still refer to the original srmodels/srmodels.bin path.
+        if Path(filename).name == "srmodels.bin" or int(offset, 0) == model_offset:
+            continue
         pairs.extend([offset, str(resolve_image(filename, build, project))])
 
-    # Replace any existing entry at the model partition offset, if present.
-    for index in range(0, len(pairs), 2):
-        if int(pairs[index], 0) == model_offset:
-            del pairs[index:index + 2]
-            break
+    # Add the explicitly staged model image at the model partition offset.
     pairs.extend([hex(model_offset), str(args.model.resolve())])
 
     output = args.output.resolve()
