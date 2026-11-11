@@ -1,0 +1,77 @@
+name: Build merged ESP32-S3 firmware
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/speaker-id-mfcc-dtw
+    paths:
+      - 'main/**'
+      - 'components/**'
+      - 'partitions/**'
+      - 'scripts/**'
+      - 'platformio.ini'
+      - 'sdkconfig.defaults'
+      - '.github/workflows/build-merged-firmware.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade platformio
+
+      - name: Build ESP-IDF firmware
+        run: pio run -e esp32-s3-devkitc-1
+
+      - name: Locate ESP-SR model image
+        id: model
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=""
+          while IFS= read -r -d '' candidate; do
+            if [[ -s "$candidate" ]]; then
+              MODEL="$candidate"
+              break
+            fi
+          done < <(find . -type f -name 'srmodels.bin' -not -path './.pio/*' -print0)
+          if [[ -z "$MODEL" ]]; then
+            echo "::error::srmodels.bin was not found. The ESP-SR model image must be provided before a merged flash binary can be created."
+            echo "Searched repository and downloaded component files for srmodels.bin."
+            exit 1
+          fi
+          echo "path=$MODEL" >> "$GITHUB_OUTPUT"
+          echo "Using model image: $MODEL ($(stat -c%s "$MODEL") bytes)"
+
+      - name: Create merged flash binary
+        run: |
+          python scripts/merge_firmware.py \
+            --build .pio/build/esp32-s3-devkitc-1 \
+            --partitions partitions/partitions.csv \
+            --model "${{ steps.model.outputs.path }}" \
+            --output merged-firmware.bin
+
+      - name: Upload firmware binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-s3-merged-firmware
+          path: |
+            merged-firmware.bin
+            .pio/build/esp32-s3-devkitc-1/firmware.bin
+            .pio/build/esp32-s3-devkitc-1/bootloader/bootloader.bin
+            .pio/build/esp32-s3-devkitc-1/partition_table/partition-table.bin
+          if-no-files-found: error
+          retention-days: 14
