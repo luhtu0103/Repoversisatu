@@ -35,6 +35,10 @@ def resolve_image(value: str, build: Path, project: Path) -> Path:
     aliases = {
         "partition-table.bin": ["partitions.bin"],
         "partitions.bin": ["partition-table.bin"],
+        # ESP-IDF names the application image after project(Repoversiempat),
+        # while PlatformIO emits firmware.bin.
+        "Repoversiempat.bin": ["firmware.bin"],
+        "firmware.bin": ["Repoversiempat.bin"],
     }
     names = [candidate.name, *aliases.get(candidate.name, [])]
     matches = []
