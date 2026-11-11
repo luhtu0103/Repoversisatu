@@ -31,15 +31,22 @@ def resolve_image(value: str, build: Path, project: Path) -> Path:
     # ESP-IDF flash metadata can use paths relative to a different build root.
     # Search the whole project build tree by basename as a compatibility fallback.
     search_roots = [build, project / ".pio" / "build", project / "build"]
+    # PlatformIO renames a few ESP-IDF generated images.
+    aliases = {
+        "partition-table.bin": ["partitions.bin"],
+        "partitions.bin": ["partition-table.bin"],
+    }
+    names = [candidate.name, *aliases.get(candidate.name, [])]
     matches = []
     seen = set()
     for root in search_roots:
         if not root.exists():
             continue
-        for path in root.rglob(candidate.name):
-            if path.is_file() and path.resolve() not in seen:
-                matches.append(path)
-                seen.add(path.resolve())
+        for name in names:
+            for path in root.rglob(name):
+                if path.is_file() and path.resolve() not in seen:
+                    matches.append(path)
+                    seen.add(path.resolve())
     if len(matches) == 1:
         return matches[0].resolve()
     if len(matches) > 1:
