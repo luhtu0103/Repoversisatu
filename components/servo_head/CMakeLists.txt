@@ -1,0 +1,1 @@
+idf_component_register(SRCS "servo_head.cpp" INCLUDE_DIRS "include" REQUIRES driver freertos PRIV_REQUIRES esp_driver_ledc esp_driver_gpio)
