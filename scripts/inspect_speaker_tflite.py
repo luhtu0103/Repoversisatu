@@ -71,6 +71,7 @@ def main():
 
     ops = []
     seen = set()
+    control_flow = []
     for i in range(model.OperatorCodesLength()):
         op = model.OperatorCodes(i)
         code = op.BuiltinCode()
@@ -88,8 +89,31 @@ def main():
                 "version": op.Version(),
             })
 
+    for gi in range(model.SubgraphsLength()):
+        graph = model.Subgraphs(gi)
+        for oi in range(graph.OperatorsLength()):
+            op = graph.Operators(oi)
+            opcode = model.OperatorCodes(op.OpcodeIndex())
+            code = opcode.BuiltinCode()
+            deprecated = opcode.DeprecatedBuiltinCode()
+            if code == 0 and deprecated != 0:
+                code = deprecated
+            if enum_name(tflite.BuiltinOperator, code) == "WHILE":
+                opts = op.BuiltinOptions()
+                while_opts = tflite.WhileOptions()
+                while_opts.Init(opts.Bytes, opts.Pos)
+                control_flow.append({
+                    "parent_subgraph": gi,
+                    "operator_index": oi,
+                    "condition_subgraph": while_opts.CondSubgraphIndex(),
+                    "body_subgraph": while_opts.BodySubgraphIndex(),
+                    "input_tensor_indices": [op.Inputs(i) for i in range(op.InputsLength())],
+                    "output_tensor_indices": [op.Outputs(i) for i in range(op.OutputsLength())],
+                })
+
     report = {
         "file": path.name,
+        "control_flow_while": control_flow,
         "size_bytes": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
         "flatbuffer_identifier": data[4:8].decode("ascii"),
@@ -111,6 +135,7 @@ def main():
         "sha256": report["sha256"],
         "schema_version": report["schema_version"],
         "operators": report["operators"],
+        "control_flow_while": report["control_flow_while"],
         "subgraphs": [{
             "index": g["index"],
             "tensor_count": g["tensor_count"],
