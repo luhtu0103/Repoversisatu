@@ -49,8 +49,17 @@ jobs:
             fi
           done < <(find . -type f -name 'srmodels.bin' -not -path './.pio/*' -print0)
           if [[ -z "$MODEL" ]]; then
-            echo "::error::srmodels.bin was not found. The ESP-SR model image must be provided before a merged flash binary can be created."
-            echo "Searched repository and downloaded component files for srmodels.bin."
+            INDEX="$(find managed_components -type f -name 'wn9_index' -print -quit 2>/dev/null || true)"
+            if [[ -n "$INDEX" ]]; then
+              MODEL_DIR="$(dirname "$INDEX")"
+              MODEL_ROOT="$(dirname "$MODEL_DIR")"
+              MODEL="$GITHUB_WORKSPACE/srmodels.bin"
+              python scripts/pack_model.py --model_path "$MODEL_ROOT" --out_file "$MODEL"
+            fi
+          fi
+          if [[ -z "$MODEL" || ! -s "$MODEL" ]]; then
+            echo "::error::Could not locate an existing srmodels.bin or ESP-SR wn9_index model assets."
+            echo "The ESP-SR model assets must be available to create the model partition."
             exit 1
           fi
           echo "path=$MODEL" >> "$GITHUB_OUTPUT"
