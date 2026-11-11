@@ -27,6 +27,21 @@ def resolve_image(value: str, build: Path, project: Path) -> Path:
     for path in options:
         if path.is_file():
             return path.resolve()
+
+    # PlatformIO may flatten ESP-IDF generated images into the build root
+    # even when flasher_args.json records ESP-IDF's nested path.
+    matches = list(build.rglob(candidate.name)) if not candidate.is_absolute() else []
+    matches = [path for path in matches if path.is_file()]
+    if len(matches) == 1:
+        return matches[0].resolve()
+    if len(matches) > 1:
+        preferred = [path for path in matches if path.parent == build]
+        if len(preferred) == 1:
+            return preferred[0].resolve()
+        raise RuntimeError(
+            f"Ambiguous flash image from flasher_args.json: {value}; "
+            f"matches: {', '.join(str(path) for path in matches)}"
+        )
     raise RuntimeError(f"Flash image from flasher_args.json not found: {value}")
 
 
