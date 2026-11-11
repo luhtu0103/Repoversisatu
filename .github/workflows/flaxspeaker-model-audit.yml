@@ -1,0 +1,56 @@
+name: FlaxSpeaker detailed model audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "scripts/audit_model.py"
+      - ".github/workflows/flaxspeaker-model-audit.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install audit dependencies
+        run: python -m pip install --upgrade pip tflite huggingface_hub
+
+      - name: Download pinned FP32 model
+        id: model
+        shell: bash
+        run: |
+          python - <<'PY'
+          from huggingface_hub import hf_hub_download
+          p = hf_hub_download(
+              repo_id="wq2012/univ_lstm_small_ge2e",
+              filename="model_fp32.tflite",
+              revision="93788410cf95b2949912118d0fbe9e499bdbb193",
+          )
+          print(f"MODEL_PATH={p}")
+          with open(__import__("os").environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"path={p}\n")
+          PY
+
+      - name: Run detailed operator and tensor audit
+        run: |
+          mkdir -p build/flaxspeaker-model-audit
+          python scripts/audit_model.py "${{ steps.model.outputs.path }}" | tee build/flaxspeaker-model-audit/audit.log
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flaxspeaker-model-audit
+          path: build/flaxspeaker-model-audit/
+          if-no-files-found: warn
