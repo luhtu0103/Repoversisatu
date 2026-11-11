@@ -28,10 +28,18 @@ def resolve_image(value: str, build: Path, project: Path) -> Path:
         if path.is_file():
             return path.resolve()
 
-    # PlatformIO may flatten ESP-IDF generated images into the build root
-    # even when flasher_args.json records ESP-IDF's nested path.
-    matches = list(build.rglob(candidate.name)) if not candidate.is_absolute() else []
-    matches = [path for path in matches if path.is_file()]
+    # ESP-IDF flash metadata can use paths relative to a different build root.
+    # Search the whole project build tree by basename as a compatibility fallback.
+    search_roots = [build, project / ".pio" / "build", project / "build"]
+    matches = []
+    seen = set()
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for path in root.rglob(candidate.name):
+            if path.is_file() and path.resolve() not in seen:
+                matches.append(path)
+                seen.add(path.resolve())
     if len(matches) == 1:
         return matches[0].resolve()
     if len(matches) > 1:
@@ -42,8 +50,10 @@ def resolve_image(value: str, build: Path, project: Path) -> Path:
             f"Ambiguous flash image from flasher_args.json: {value}; "
             f"matches: {', '.join(str(path) for path in matches)}"
         )
-    raise RuntimeError(f"Flash image from flasher_args.json not found: {value}")
-
+    raise RuntimeError(
+        f"Flash image from flasher_args.json not found: {value}. "
+        f"Searched build roots: {', '.join(str(root) for root in search_roots)}"
+    )
 
 def main():
     parser = argparse.ArgumentParser()
