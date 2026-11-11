@@ -53,8 +53,16 @@ jobs:
             if [[ -n "$INDEX" ]]; then
               MODEL_DIR="$(dirname "$INDEX")"
               MODEL_ROOT="$(dirname "$MODEL_DIR")"
+              STAGE_ROOT="$RUNNER_TEMP/esp-sr-models"
+              mkdir -p "$STAGE_ROOT"
+              # Only package WakeNet Hi ESP and NSNet2; all ESP-SR assets
+              # exceed the 4 MB model partition.
+              cp -a "$MODEL_DIR" "$STAGE_ROOT/"
+              while IFS= read -r -d '' ns_dir; do
+                cp -a "$ns_dir" "$STAGE_ROOT/"
+              done < <(find "$MODEL_ROOT" -mindepth 1 -maxdepth 1 -type d -iname '*nsnet2*' -print0)
               MODEL="$GITHUB_WORKSPACE/srmodels.bin"
-              python scripts/pack_model.py --model_path "$MODEL_ROOT" --out_file "$MODEL"
+              python scripts/pack_model.py --model_path "$STAGE_ROOT" --out_file "$MODEL"
             fi
           fi
           if [[ -z "$MODEL" || ! -s "$MODEL" ]]; then
