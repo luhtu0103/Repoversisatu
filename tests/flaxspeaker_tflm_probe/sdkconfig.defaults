@@ -11,3 +11,5 @@ CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=98304
 # Diagnostic only: allow one slow FP32 Invoke to finish so its latency can be measured.
 # Do not treat this timeout as a production watchdog setting.
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+# Diagnostic inference worker runs on CPU1; main task yields on CPU0 and a 120 s monitor bounds the test.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
