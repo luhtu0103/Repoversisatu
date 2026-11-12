@@ -40,7 +40,7 @@ static const char *TAG = "MAIN";
 #define BOOT_BUTTON_GPIO GPIO_NUM_0
 
 // Explicit Gemini enrollment consumes the existing audio_task microphone stream.
-static constexpr size_t SPEAKER_CAPTURE_SAMPLES = 19200; // 1.2 s at 16 kHz
+static constexpr size_t SPEAKER_CAPTURE_SAMPLES = 38400; // 2.4 s at 16 kHz
 static int16_t *speaker_capture_pcm = nullptr;
 static volatile bool speaker_capture_active = false;
 static volatile bool speaker_busy = false;
@@ -69,7 +69,7 @@ static void speaker_capture_start(const char *name) {
     speaker_capture_pos = 0;
     speaker_busy = true;
     speaker_capture_active = true;
-    ESP_LOGI("SPEAKER_ID", "Pendaftaran eksplisit '%s': silakan bicara 1,2 detik", speaker_capture_name);
+    ESP_LOGI("SPEAKER_ID", "Pendaftaran eksplisit '%s': silakan bicara 2,4 detik", speaker_capture_name);
     display_status("Daftar suara: bicara");
 }
 
