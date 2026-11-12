@@ -193,8 +193,10 @@ static void load_profiles(void)
     }
 
     profile_count = 0;
+    /* profile_t is about 4.2 KiB; keep it off the startup task stack. */
+    static profile_t profile;
     for (size_t i = 0; i < PROFILE_N; ++i) {
-        profile_t profile = {};
+        memset(&profile, 0, sizeof(profile));
         size_t length = sizeof(profile);
         if (nvs_get_blob(handle, profile_key(i), &profile, &length) == ESP_OK &&
             length == sizeof(profile) &&
