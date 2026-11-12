@@ -2,6 +2,9 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -40,6 +43,15 @@ static size_t ring_count = 0;
 static size_t silence_samples = 0;
 static bool was_speech = false;
 static bool initialized = false;
+
+static constexpr size_t AUDIO_QUEUE_DEPTH = 3;
+static constexpr size_t AUDIO_FRAME_MAX_SAMPLES = 1024;
+typedef struct {
+    uint16_t samples;
+    int16_t pcm[AUDIO_FRAME_MAX_SAMPLES];
+} speaker_audio_frame_t;
+static QueueHandle_t audio_queue = nullptr;
+static TaskHandle_t audio_worker_handle = nullptr;
 
 static float fft_re[FFT_N];
 static float fft_im[FFT_N];
@@ -195,6 +207,8 @@ static void load_profiles(void)
     ESP_LOGI(TAG, "Profil suara dimuat dari NVS: %u", (unsigned)profile_count);
 }
 
+static void speaker_id_audio_worker(void *arg);
+
 extern "C" void speaker_id_init(void)
 {
     if (initialized) {
@@ -208,17 +222,29 @@ extern "C" void speaker_id_init(void)
         mel_edges[i] = mel_to_hz(mel);
     }
     load_profiles();
+
+    audio_queue = xQueueCreate(AUDIO_QUEUE_DEPTH, sizeof(speaker_audio_frame_t));
+    if (audio_queue == nullptr) {
+        ESP_LOGE(TAG, "Gagal membuat antrean audio; pengenalan suara dinonaktifkan");
+        return;
+    }
+    const BaseType_t task_result = xTaskCreatePinnedToCore(
+        speaker_id_audio_worker, "speaker_id", 6144, nullptr, 3,
+        &audio_worker_handle, 1);
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "Gagal membuat task speaker ID; pengenalan suara dinonaktifkan");
+        vQueueDelete(audio_queue);
+        audio_queue = nullptr;
+        return;
+    }
+    ESP_LOGI(TAG, "Worker MFCC-DTW aktif di task terpisah");
 }
 
-extern "C" void speaker_id_process_pcm(const int16_t *pcm, size_t samples)
+static void process_pcm_internal(const int16_t *pcm, size_t samples)
 {
     if (pcm == nullptr || samples == 0) {
         return;
     }
-    if (!initialized) {
-        speaker_id_init();
-    }
-
     uint64_t energy = 0;
     for (size_t i = 0; i < samples; ++i) {
         const int32_t value = pcm[i];
@@ -250,6 +276,34 @@ extern "C" void speaker_id_process_pcm(const int16_t *pcm, size_t samples)
             frame_fill = FRAME_N - HOP_N;
         }
     }
+}
+
+static void speaker_id_audio_worker(void *arg)
+{
+    (void)arg;
+    speaker_audio_frame_t frame;
+    for (;;) {
+        if (xQueueReceive(audio_queue, &frame, portMAX_DELAY) == pdTRUE &&
+            frame.samples > 0 && frame.samples <= AUDIO_FRAME_MAX_SAMPLES) {
+            process_pcm_internal(frame.pcm, frame.samples);
+        }
+    }
+}
+
+extern "C" void speaker_id_process_pcm(const int16_t *pcm, size_t samples)
+{
+    if (pcm == nullptr || samples == 0 || audio_queue == nullptr) {
+        return;
+    }
+    if (samples > AUDIO_FRAME_MAX_SAMPLES) {
+        pcm += samples - AUDIO_FRAME_MAX_SAMPLES;
+        samples = AUDIO_FRAME_MAX_SAMPLES;
+    }
+
+    speaker_audio_frame_t frame = {};
+    frame.samples = static_cast<uint16_t>(samples);
+    memcpy(frame.pcm, pcm, samples * sizeof(int16_t));
+    (void)xQueueSend(audio_queue, &frame, 0);
 }
 
 static void copy_recent(int16_t dst[SEQ_N][MFCC_N], size_t *count)
