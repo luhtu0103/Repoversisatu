@@ -1,0 +1,44 @@
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/partitions.csv"
+
+CONFIG_ESP32S3_SPIRAM_SUPPORT=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_BOOT_INIT=y
+
+# Match the Repo6 ESP32-S3 memory policy:
+# - small allocations (<= 2 KiB) stay in internal RAM for latency-sensitive work
+# - larger malloc() allocations may use PSRAM
+# - keep 96 KiB of internal RAM reserved for critical system/driver allocations
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=2048
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=98304
+
+# ESP-SR WakeNet9 - Hi ESP
+CONFIG_SR_WN_WN9_HIESP=y
+
+# ESP-SR NSNet2 - noise suppression for far-field speech clarity
+CONFIG_SR_NSN_NSNET2=y
+
+# ESP-SR AFE voice activity detection (WebRTC VAD; no extra model required)
+CONFIG_SR_VADN_WEBRTC=y
+
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y
+
+# TLS allocates a 16 KiB-class buffer; internal DRAM is constrained after audio workers start.
+# ESP32-S3 supports external SPIRAM for mbedTLS allocations. Verify effective sdkconfig after reconfigure.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# TLS diagnostics disabled after confirming Gemini TLS/WebSocket setup succeeds.
+
+# V7.0.19: prevent ESP WebSocket RX/TX lock contention during Gemini Live streaming.
+# ESP WebSocket Client provides a separate TX lock specifically for concurrent
+# send/receive traffic. This is important for full-duplex Gemini audio.
+CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y
+CONFIG_ESP_WS_CLIENT_TX_LOCK_TIMEOUT_MS=2000
+
+# Allow servo worker task stack to be allocated in external PSRAM
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
