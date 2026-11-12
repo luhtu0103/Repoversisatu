@@ -228,7 +228,8 @@ static void log_audio_heap(const char *stage)
 }
 void audio_hal_init(void)
 {
-    speaker_id_init();
+    /* Speaker-ID is initialized lazily on the first processed microphone frame.
+     * Avoid adding its task and queues to the boot-time Wi-Fi startup path. */
     ESP_LOGI(TAG, "Menginisialisasi Audio I2S - proven v6.1.5 / Xiaozhi-compatible...");
     i2s_chan_config_t tx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     tx_chan_cfg.dma_desc_num = 6; tx_chan_cfg.dma_frame_num = 240; tx_chan_cfg.auto_clear = true;
