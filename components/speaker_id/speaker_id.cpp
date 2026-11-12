@@ -314,7 +314,15 @@ static void speaker_id_audio_worker(void *arg)
 
 extern "C" void speaker_id_process_pcm(const int16_t *pcm, size_t samples)
 {
-    if (pcm == nullptr || samples == 0 || audio_queue == nullptr) {
+    if (pcm == nullptr || samples == 0) {
+        return;
+    }
+    /* Start the MFCC worker only when real microphone PCM is available,
+     * not during early boot before Wi-Fi/cache initialization. */
+    if (audio_queue == nullptr) {
+        speaker_id_init();
+    }
+    if (audio_queue == nullptr) {
         return;
     }
     if (samples > AUDIO_FRAME_MAX_SAMPLES) {
