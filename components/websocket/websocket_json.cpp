@@ -4,6 +4,7 @@
 #include "audio_hal.h"
 #include "uart_control.h"
 #include "ai_memory.h"
+#include "speaker_id.h"
 #include "servo_head.h"
 
 #include "esp_log.h"
@@ -236,6 +237,7 @@ bool build_gemini_setup(char **output, size_t *output_len)
     cJSON *system_text = cJSON_CreateObject();
     cJSON_AddStringToObject(system_text, "text",
             "Kamu adalah asisten suara berbahasa Indonesia. " 
+    "Sebelum menjawab setiap giliran ucapan pengguna, panggil speaker_identify satu kali. Jika cocok, gunakan nama profil secara natural; jika tidak cocok atau belum ada profil, gunakan sapaan netral dan jangan menebak nama. Untuk mendaftarkan suara, tunggu permintaan eksplisit pengguna yang memuat frasa daftarkan suara; panggil speaker_enroll dengan nama yang pengguna nyatakan. Setelah tool mengembalikan hasil, konfirmasikan dengan jujur, termasuk jika gagal. " 
     "Dalam sesi percakapan Gemini Live yang sedang aktif, gunakan konteks percakapan sebelumnya pada sesi yang sama untuk memahami rujukan dan pertanyaan lanjutan; jangan memperlakukan setiap turn sebagai percakapan baru. " 
     "Konteks sesi hanya berlaku untuk sesi aktif. Ketika perangkat memulai sesi baru tanpa session-resumption handle, perlakukan percakapan sebagai baru dan jangan menganggap kamu mengingat sesi sebelumnya. "
     "Jika pengguna meminta aksi pada perangkat, gunakan fungsi control_device dengan command tombol yang tepat. "
@@ -279,6 +281,16 @@ bool build_gemini_setup(char **output, size_t *output_len)
     }
     add_device_control_tool(setup);
     add_memory_tools(setup);
+    /* Speaker enrollment and identification are explicit Gemini tools. */
+    cJSON *speaker_tool = cJSON_CreateObject();
+    cJSON *speaker_decls = cJSON_AddArrayToObject(speaker_tool, "functionDeclarations");
+    cJSON *enroll = cJSON_CreateObject();
+    cJSON_AddStringToObject(enroll, "name", "speaker_enroll");
+    cJSON_AddStringToObject(enroll, "behavior", "BLOCKING");
+    cJSON_AddStringToObject(enroll, "description", "Pendaftaran biometrik suara hanya setelah pengguna secara eksplisit mengatakan 'daftarkan suara'. Gunakan untuk permintaan seperti 'daftarkan suara: saya adalah Bos'. Ambil hanya nama profil yang pengguna nyatakan sebagai identitasnya; jangan mendaftarkan atas permintaan yang ambigu. Tool menyimpan fitur MFCC suara terbaru ke flash NVS dan mengembalikan hasil sebenarnya. Jangan pernah mengklaim berhasil jika hasil gagal.");
+    cJSON *ep = cJSON_AddObjectToObject(enroll, "parameters"); cJSON_AddStringToObject(ep, "type", "OBJECT"); cJSON *eprops = cJSON_AddObjectToObject(ep, "properties"); cJSON *ename = cJSON_AddObjectToObject(eprops, "name"); cJSON_AddStringToObject(ename, "type", "STRING"); cJSON_AddStringToObject(ename, "description", "Nama profil singkat yang diucapkan pengguna, misalnya Bos; tanpa frasa 'saya adalah'."); cJSON *er = cJSON_AddArrayToObject(ep, "required"); cJSON_AddItemToArray(er, cJSON_CreateString("name")); cJSON_AddItemToArray(speaker_decls, enroll);
+    cJSON *identify = cJSON_CreateObject(); cJSON_AddStringToObject(identify, "name", "speaker_identify"); cJSON_AddStringToObject(identify, "behavior", "BLOCKING"); cJSON_AddStringToObject(identify, "description", "Panggil sekali untuk setiap giliran ucapan pengguna sebelum menjawab, untuk membandingkan fitur MFCC-DTW terbaru dengan profil suara NVS. Gunakan nama hanya jika ada kecocokan; jika tidak, jangan menebak.");
+    cJSON *ip = cJSON_AddObjectToObject(identify, "parameters"); cJSON_AddStringToObject(ip, "type", "OBJECT"); cJSON_AddItemToArray(speaker_decls, identify); cJSON_AddItemToArray(cJSON_GetObjectItem(setup, "tools"), speaker_tool);
 
     cJSON *realtime = cJSON_AddObjectToObject(setup, "realtimeInputConfig");
     cJSON *aad = cJSON_AddObjectToObject(realtime, "automaticActivityDetection");
@@ -339,6 +351,7 @@ static cJSON *parse_json_with_diagnostics(const char *json, size_t len)
 static char latest_user_transcript[768];
 static bool pending_explicit_memory_save = false;
 static bool pending_explicit_memory_delete = false;
+static bool pending_explicit_speaker_enroll = false;
 /* Keep memory-read workspace off the WebSocket RX task stack. */
 static char memory_read_context[4096];
 
@@ -429,6 +442,14 @@ static void remember_user_transcript(const char *text)
         pending_explicit_memory_save = true;
         ESP_LOGI(TAG, "AI_MEMORY: izin simpan eksplisit terdeteksi pada transkrip pengguna");
     }
+    static const char *const speaker_negations[] = { "jangan daftarkan suara", "jangan daftarkan rekaman", "tidak jadi daftar suara", "batal daftarkan suara" };
+    static const char *const speaker_words[] = { "daftarkan suara", "daftarkan rekaman suara", "daftarkan rekaman" };
+    if (transcript_has_any(latest_user_transcript, speaker_negations, sizeof(speaker_negations) / sizeof(speaker_negations[0]))) {
+        pending_explicit_speaker_enroll = false;
+    } else if (transcript_has_any(latest_user_transcript, speaker_words, sizeof(speaker_words) / sizeof(speaker_words[0]))) {
+        pending_explicit_speaker_enroll = true;
+        ESP_LOGI(TAG, "SPEAKER_ID: izin pendaftaran eksplisit terdeteksi");
+    }
     if (delete_negated) {
         pending_explicit_memory_delete = false;
     } else if (transcript_has_any(latest_user_transcript, delete_words,
@@ -449,6 +470,13 @@ static bool explicit_memory_delete_request(void)
 {
     bool allowed = pending_explicit_memory_delete;
     pending_explicit_memory_delete = false;
+    return allowed;
+}
+
+static bool explicit_speaker_enroll_request(void)
+{
+    bool allowed = pending_explicit_speaker_enroll;
+    pending_explicit_speaker_enroll = false;
     return allowed;
 }
 
@@ -511,6 +539,29 @@ static void process_gemini_tool_call(cJSON *tool_call)
                     delete_detail[0] ? delete_detail : "Penghapusan gagal; tidak ada perubahan yang dikonfirmasi.");
                 continue;
             }
+        } else if (strcmp(name->valuestring, "speaker_enroll") == 0) {
+            cJSON *profile_name = cJSON_GetObjectItem(args, "name");
+            if (!explicit_speaker_enroll_request()) {
+                (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
+                    "Pendaftaran ditolak karena transkrip pengguna tidak memuat perintah eksplisit 'daftarkan suara'. Minta pengguna mengucapkannya terlebih dahulu.");
+                continue;
+            }
+            char result[192] = {};
+            if (cJSON_IsString(profile_name) && profile_name->valuestring)
+                success = speaker_id_enroll_last(profile_name->valuestring, result, sizeof(result));
+            else strlcpy(result, "Nama profil tidak diberikan.", sizeof(result));
+            (void)websocket_send_tool_response_text(id->valuestring, name->valuestring, result);
+            continue;
+        } else if (strcmp(name->valuestring, "speaker_identify") == 0) {
+            char speaker_name[SPEAKER_ID_NAME_MAX] = {};
+            float distance = 0.0f;
+            success = speaker_id_identify(speaker_name, sizeof(speaker_name), &distance);
+            char result[192] = {};
+            if (success) snprintf(result, sizeof(result), "Pembicara cocok dengan profil '%s' (jarak %.1f). Gunakan nama ini secara natural untuk menyapa; jangan menyatakan tingkat kepastian lebih tinggi dari hasil.", speaker_name, (double)distance);
+            else if (speaker_id_profile_count() == 0) strlcpy(result, "Belum ada profil suara terdaftar; jangan menebak nama pengguna.", sizeof(result));
+            else strlcpy(result, "Pembicara tidak cocok dengan profil terdaftar. Jangan menebak nama; gunakan sapaan netral.", sizeof(result));
+            (void)websocket_send_tool_response_text(id->valuestring, name->valuestring, result);
+            continue;
         } else if (strcmp(name->valuestring, "memory_read") == 0) {
             memory_read_context[0] = '\0';
             size_t memory_len = ai_memory_get_context(memory_read_context, sizeof(memory_read_context));
