@@ -274,8 +274,12 @@ static void websocket_tx_task(void *arg)
                     int64_t send_elapsed_ms = (esp_timer_get_time() - send_start_us) / 1000;
                     if (sent == json_len) {
                         if (send_elapsed_ms >= 100)
-                            ESP_LOGW(TAG, "TX audio send_text slow: duration=%lldms bytes=%d pcm_chunk=%u offset=%u/%u",
-                                     (long long)send_elapsed_ms, json_len, (unsigned)chunk_len, (unsigned)offset, (unsigned)cmd.len);
+                            ESP_LOGW(TAG, "TX audio send_text slow: duration=%lldms bytes=%d pcm_chunk=%u offset=%u/%u heap_internal_free=%u heap_internal_largest=%u heap_internal_min=%u psram_free=%u",
+                                     (long long)send_elapsed_ms, json_len, (unsigned)chunk_len, (unsigned)offset, (unsigned)cmd.len,
+                                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                                     (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
                         chunk_sent = true;
                         break;
                     }
