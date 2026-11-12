@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -43,6 +44,23 @@ static size_t ring_count = 0;
 static size_t silence_samples = 0;
 static bool was_speech = false;
 static bool initialized = false;
+static bool initializing = false;
+static portMUX_TYPE init_mux = portMUX_INITIALIZER_UNLOCKED;
+static SemaphoreHandle_t state_mutex = nullptr;
+
+class SpeakerIdStateLock {
+public:
+    SpeakerIdStateLock() : locked_(state_mutex != nullptr &&
+        xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {}
+    ~SpeakerIdStateLock() {
+        if (locked_) {
+            xSemaphoreGive(state_mutex);
+        }
+    }
+    bool locked() const { return locked_; }
+private:
+    bool locked_;
+};
 
 static constexpr size_t AUDIO_QUEUE_DEPTH = 3;
 static constexpr size_t AUDIO_FRAME_MAX_SAMPLES = 1024;
@@ -215,17 +233,30 @@ static void speaker_id_audio_worker(void *arg);
 
 extern "C" void speaker_id_init(void)
 {
-    if (initialized) {
+    portENTER_CRITICAL(&init_mux);
+    if (initialized || initializing) {
+        portEXIT_CRITICAL(&init_mux);
         return;
     }
-    initialized = true;
+    initializing = true;
+    portEXIT_CRITICAL(&init_mux);
 
     const float max_mel = hz_to_mel((float)SAMPLE_RATE / 2.0f);
     for (int i = 0; i < MEL_N + 2; ++i) {
         const float mel = (float)i * max_mel / (float)(MEL_N + 1);
         mel_edges[i] = mel_to_hz(mel);
     }
+    profile_count = 0;
     load_profiles();
+
+    state_mutex = xSemaphoreCreateMutex();
+    if (state_mutex == nullptr) {
+        ESP_LOGE(TAG, "Gagal membuat mutex state speaker ID");
+        portENTER_CRITICAL(&init_mux);
+        initializing = false;
+        portEXIT_CRITICAL(&init_mux);
+        return;
+    }
 
     audio_queue = xQueueCreate(AUDIO_QUEUE_DEPTH, sizeof(speaker_audio_frame_t *));
     audio_free_queue = xQueueCreate(AUDIO_QUEUE_DEPTH, sizeof(speaker_audio_frame_t *));
@@ -235,6 +266,11 @@ extern "C" void speaker_id_init(void)
         if (audio_free_queue != nullptr) vQueueDelete(audio_free_queue);
         audio_queue = nullptr;
         audio_free_queue = nullptr;
+        vSemaphoreDelete(state_mutex);
+        state_mutex = nullptr;
+        portENTER_CRITICAL(&init_mux);
+        initializing = false;
+        portEXIT_CRITICAL(&init_mux);
         return;
     }
     for (size_t i = 0; i < AUDIO_QUEUE_DEPTH; ++i) {
@@ -245,6 +281,11 @@ extern "C" void speaker_id_init(void)
             vQueueDelete(audio_free_queue);
             audio_queue = nullptr;
             audio_free_queue = nullptr;
+            vSemaphoreDelete(state_mutex);
+            state_mutex = nullptr;
+            portENTER_CRITICAL(&init_mux);
+            initializing = false;
+            portEXIT_CRITICAL(&init_mux);
             return;
         }
     }
@@ -257,8 +298,17 @@ extern "C" void speaker_id_init(void)
         vQueueDelete(audio_free_queue);
         audio_queue = nullptr;
         audio_free_queue = nullptr;
+        vSemaphoreDelete(state_mutex);
+        state_mutex = nullptr;
+        portENTER_CRITICAL(&init_mux);
+        initializing = false;
+        portEXIT_CRITICAL(&init_mux);
         return;
     }
+    portENTER_CRITICAL(&init_mux);
+    initialized = true;
+    initializing = false;
+    portEXIT_CRITICAL(&init_mux);
     ESP_LOGI(TAG, "Worker MFCC-DTW aktif di task terpisah");
 }
 
@@ -307,7 +357,10 @@ static void speaker_id_audio_worker(void *arg)
     for (;;) {
         if (xQueueReceive(audio_queue, &frame, portMAX_DELAY) == pdTRUE && frame != nullptr) {
             if (frame->samples > 0 && frame->samples <= AUDIO_FRAME_MAX_SAMPLES) {
-                process_pcm_internal(frame->pcm, frame->samples);
+                SpeakerIdStateLock lock;
+                if (lock.locked()) {
+                    process_pcm_internal(frame->pcm, frame->samples);
+                }
             }
             (void)xQueueSend(audio_free_queue, &frame, portMAX_DELAY);
         }
@@ -366,6 +419,13 @@ extern "C" bool speaker_id_enroll_last(const char *name, char *result, size_t re
     }
     if (!initialized) {
         speaker_id_init();
+    }
+    SpeakerIdStateLock state_lock;
+    if (!state_lock.locked()) {
+        if (result != nullptr && result_len > 0) {
+            strlcpy(result, "Mutex state speaker ID belum siap.", result_len);
+        }
+        return false;
     }
     if (ring_count < 45) {
         if (result != nullptr && result_len > 0) {
@@ -478,7 +538,8 @@ extern "C" bool speaker_id_identify(char *name, size_t name_len, float *distance
     if (!initialized) {
         speaker_id_init();
     }
-    if (ring_count < 45 || profile_count == 0) {
+    SpeakerIdStateLock state_lock;
+    if (!state_lock.locked() || ring_count < 45 || profile_count == 0) {
         return false;
     }
 
@@ -530,5 +591,6 @@ extern "C" size_t speaker_id_profile_count(void)
     if (!initialized) {
         speaker_id_init();
     }
-    return profile_count;
+    SpeakerIdStateLock state_lock;
+    return state_lock.locked() ? profile_count : 0;
 }
