@@ -212,23 +212,24 @@ static void websocket_tx_task(void *arg)
             static char *json_buf = NULL;
             if (!b64_buf) {
                 if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0)
-                    b64_buf = (char *)heap_caps_malloc(1800, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                    b64_buf = (char *)heap_caps_malloc(900, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
                 if (!b64_buf)
-                    b64_buf = (char *)heap_caps_malloc(1800, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                    b64_buf = (char *)heap_caps_malloc(900, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
             }
             if (!json_buf) {
                 if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0)
-                    json_buf = (char *)heap_caps_malloc(2048, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                    json_buf = (char *)heap_caps_malloc(1024, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
                 if (!json_buf)
-                    json_buf = (char *)heap_caps_malloc(2048, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                    json_buf = (char *)heap_caps_malloc(1024, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
             }
             if (!b64_buf || !json_buf) {
                 ESP_LOGE(TAG, "TX buffer allocation gagal (base64/json)");
                 heap_caps_free(audio_data);
                 continue;
             }
-            // 1280 PCM bytes = 40 ms at 16 kHz mono PCM16; reduces per-send overhead.
-            constexpr size_t PCM_SEND_CHUNK = 1280;
+            // 640 PCM bytes = 20 ms at 16 kHz mono PCM16. Smaller JSON frames
+            // reduce per-write buffering and limit the impact of TX backpressure.
+            constexpr size_t PCM_SEND_CHUNK = 640;
             // Fail fast enough that a stalled socket cannot consume the
             // entire bounded microphone capture budget before TX recovery starts.
             /* Match RepoV3: allow TLS/WebSocket writes enough time under load. */
@@ -247,15 +248,15 @@ static void websocket_tx_task(void *arg)
                 size_t chunk_len = cmd.len - offset;
                 if (chunk_len > PCM_SEND_CHUNK) chunk_len = PCM_SEND_CHUNK;
                 size_t encoded_len = 0;
-                int ret = mbedtls_base64_encode((unsigned char *)b64_buf, 1800 - 1, &encoded_len, audio_data + offset, chunk_len);
+                int ret = mbedtls_base64_encode((unsigned char *)b64_buf, 900 - 1, &encoded_len, audio_data + offset, chunk_len);
                 if (ret != 0) {
                     ESP_LOGW(TAG, "TX audio base64 gagal: ret=%d chunk=%u", ret, (unsigned)chunk_len);
                     send_failed = true;
                     break;
                 }
                 b64_buf[encoded_len] = '\0';
-                int json_len = snprintf(json_buf, 2048, "{\"realtimeInput\":{\"audio\":{\"mimeType\":\"audio/pcm;rate=16000\",\"data\":\"%s\"}}}", b64_buf);
-                if (json_len < 0 || (size_t)json_len >= 2048) {
+                int json_len = snprintf(json_buf, 1024, "{\"realtimeInput\":{\"audio\":{\"mimeType\":\"audio/pcm;rate=16000\",\"data\":\"%s\"}}}", b64_buf);
+                if (json_len < 0 || (size_t)json_len >= 1024) {
                     ESP_LOGW(TAG, "TX audio JSON terlalu besar: chunk=%u", (unsigned)chunk_len);
                     send_failed = true;
                     break;
