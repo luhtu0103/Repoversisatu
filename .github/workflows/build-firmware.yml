@@ -103,6 +103,7 @@ jobs:
 
       - name: Merge flash image
         run: |
+          . /opt/esp/idf/export.sh
           python scripts/merge_firmware.py --build build --partitions partitions/partitions.csv --model build/srmodels/srmodels.bin --output build/merged-binary.bin
           test -s build/merged-binary.bin
 
