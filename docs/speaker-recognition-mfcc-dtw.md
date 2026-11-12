@@ -1,6 +1,6 @@
 # Desain Pengenalan Pembicara MFCC + DTW
 
-Status: rancangan integrasi; belum mengaktifkan pengenalan pembicara pada firmware.
+Status: implementasi awal sudah ditambahkan di branch `copy-repo5`; masih perlu validasi build CI dan uji perangkat nyata. Ambang DTW belum dikalibrasi dengan dataset perangkat.
 
 ## Hasil inspeksi branch `copy-repo5`
 
@@ -17,36 +17,30 @@ Status: rancangan integrasi; belum mengaktifkan pengenalan pembicara pada firmwa
 INMP441 / I2S
   ├── PCM mentah ───────────────> WakeNet (tetap seperti sekarang)
   └── capture PCM ──> AFE ──────> buffer audio Gemini ──> WebSocket
-                       └────────> salinan frame -> queue terbatas
-                                             -> task speaker_id
-                                             -> VAD/segmentasi suara
-                                             -> MFCC
-                                             -> DTW ke template terdaftar
-                                             -> identitas / unknown
-                                             -> konteks identitas untuk Gemini
+                       └────────> tap PCM AFE ke speaker_id
+                                  -> segmentasi energi
+                                  -> MFCC
+                                  -> DTW ke template NVS
+                                  -> hasil speaker_identify tool
+                                  -> konteks identitas untuk Gemini
 ```
 
-Pengenal pembicara harus menerima salinan frame, bukan mengambil buffer yang sama untuk dimiliki sendiri. Pemrosesan MFCC/DTW berjalan di task terpisah dengan antrean terbatas agar tidak menahan pengiriman audio Gemini. Jika antrean penuh, frame pengenal dibuang dan dihitung; jalur Gemini tidak boleh terhambat.
+Implementasi saat ini menyalin/memproses PCM keluaran AFE langsung pada jalur `audio_read_mic()` tanpa mengambil frame dari antrean audio lain. Ini menghindari persaingan konsumen dengan Gemini/WakeNet, tetapi menambah beban CPU di jalur audio; ukur latency dan underrun di perangkat nyata.
 
 ## Penyimpanan di flash
 
-Gunakan NVS, bukan menulis langsung ke alamat flash. Simpan profil sebagai blob berversi dengan:
-- ID profil dan nama yang dibatasi panjangnya;
-- parameter MFCC/model yang digunakan;
-- beberapa template fitur per pembicara;
-- checksum atau validasi panjang dan versi;
-- batas jumlah profil serta fungsi hapus profil.
+Implementasi awal memakai namespace NVS `speaker_id` dan blob profil dengan magic/version marker, nama maksimum 23 byte, dan hingga 160 frame MFCC. Batas saat ini 4 profil. Penghapusan profil belum dibuat.
 
 Inisialisasi NVS yang sudah ada di `app_main()` harus tetap menjadi prasyarat. Jangan menyimpan audio mentah kecuali benar-benar diperlukan; utamakan fitur template dan sediakan cara menghapus pendaftaran.
 
-## Pipeline MFCC + DTW yang diusulkan
+## Pipeline MFCC + DTW yang diterapkan (awal)
 
 - Input: PCM16 mono 16 kHz dari keluaran AFE.
 - Segmentasi: energi/VAD dengan ambang dan durasi minimum; abaikan segmen terlalu pendek atau terlalu senyap.
 - MFCC: pre-emphasis, window Hamming, FFT, filter-bank mel, log-energy, DCT; mulai dengan 13 koefisien dan frame 25 ms / hop 10 ms.
 - DTW: jarak fitur antar-frame dengan batas warping agar waktu komputasi terkontrol.
 - Keputusan: bandingkan skor terbaik dengan ambang yang dikalibrasi; jika tidak lolos atau margin antarprofil terlalu kecil, hasilnya `unknown`.
-- Keluaran: API lokal untuk status, nama, skor, serta API pendaftaran dan penghapusan profil.
+- Keluaran: API `speaker_id_enroll_last()` dan `speaker_id_identify()`; tool Gemini `speaker_enroll` dan `speaker_identify` mengembalikan hasil sebenarnya untuk konfirmasi/penyapaan. Pendaftaran hanya diizinkan jika transkrip memuat perintah eksplisit seperti “daftarkan suara”.
 
 ## Batasan penting
 
@@ -58,4 +52,4 @@ MFCC + DTW membandingkan rangkaian fitur akustik, tetapi bukan metode identifika
 - Jangan ubah algoritme atau pemicu WakeNet.
 - Jangan ubah format maupun pengiriman PCM Gemini.
 - Integrasi harus opt-in dan gagal secara aman: jika NVS/profil/AFE tidak tersedia, Gemini dan WakeNet tetap bekerja seperti semula.
-- Sebelum mengklaim selesai, build firmware di CI dan uji enrollment, restart/persistensi NVS, pembicara dikenal, pembicara tak dikenal, dan beban audio Gemini.
+- Sebelum mengklaim selesai, pastikan build firmware CI berhasil dan uji enrollment, restart/persistensi NVS, pembicara dikenal, pembicara tak dikenal, serta beban audio Gemini.
