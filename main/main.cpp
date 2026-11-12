@@ -30,6 +30,7 @@
 
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 #include <errno.h>
 #include <netdb.h>
 #include <sys/socket.h>
