@@ -24,6 +24,7 @@ idf_component_register(
         uart_control
         web_config
         ai_memory
+        speaker_id
         servo_head
 )
 
