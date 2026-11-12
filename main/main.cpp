@@ -380,7 +380,7 @@ static void audio_task(void *arg)
         }
 
         char enrollment_name[32] = {};
-        if (!speaker_capture_active && !speaker_busy) {
+        if (speaker_capture_pcm && !speaker_capture_active && !speaker_busy) {
             if (speaker_id_take_enrollment_request(enrollment_name, sizeof(enrollment_name))) {
                 speaker_capture_verify = false;
                 speaker_capture_start(enrollment_name);
@@ -416,7 +416,12 @@ static void audio_task(void *arg)
                     3, nullptr);
                 if (result != pdPASS) {
                     speaker_busy = false;
-                    speaker_id_complete_enrollment(ESP_ERR_NO_MEM);
+                    if (speaker_capture_verify) {
+                        speaker_id_complete_verification(ESP_ERR_NO_MEM, 0.0f);
+                        speaker_capture_verify = false;
+                    } else {
+                        speaker_id_complete_enrollment(ESP_ERR_NO_MEM);
+                    }
                     ESP_LOGE("SPEAKER_ID", "Gagal membuat task pemrosesan");
                 } else {
                     ESP_LOGI("SPEAKER_ID", "Audio terkumpul; memproses MFCC + DTW");
