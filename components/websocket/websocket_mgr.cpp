@@ -70,7 +70,7 @@ void websocket_tx_flush_queue(void)
     ws_tx_command_t stale = {};
     size_t flushed = 0;
     while (xQueueReceive(websocket_tx_queue, &stale, 0) == pdTRUE) {
-        if (stale.data) free(stale.data);
+        if (stale.data) heap_caps_free(stale.data);
         flushed++;
     }
     if (flushed) ESP_LOGW(TAG, "TX queue dibersihkan: %u command", (unsigned)flushed);
@@ -161,14 +161,14 @@ static void websocket_tx_task(void *arg)
         if (xQueueReceive(websocket_tx_queue, &cmd, portMAX_DELAY) != pdTRUE) continue;
         uint8_t *audio_data = cmd.data;
         cmd.data = NULL;
-        if (cmd.generation != websocket_connection_generation || !is_connected || websocket_tx_error || !client) { free(audio_data); continue; }
+        if (cmd.generation != websocket_connection_generation || !is_connected || websocket_tx_error || !client) { heap_caps_free(audio_data); continue; }
         esp_websocket_client_handle_t ws = client;
-        if (!esp_websocket_client_is_connected(ws)) { free(audio_data); continue; }
+        if (!esp_websocket_client_is_connected(ws)) { heap_caps_free(audio_data); continue; }
         if (cmd.type == WS_TX_COMMAND_SETUP) {
             char *setup_json = NULL; size_t setup_len = 0;
-            if (!build_gemini_setup(&setup_json, &setup_len)) { free(audio_data); continue; }
+            if (!build_gemini_setup(&setup_json, &setup_len)) { heap_caps_free(audio_data); continue; }
             if (cmd.generation != websocket_connection_generation || !is_connected || websocket_tx_error || client != ws || !esp_websocket_client_is_connected(ws)) {
-                free(setup_json); free(audio_data); continue;
+                free(setup_json); heap_caps_free(audio_data); continue;
             }
             int64_t send_start_us = esp_timer_get_time();
             int sent = esp_websocket_client_send_text(ws, setup_json, (int)setup_len, pdMS_TO_TICKS(5000));
@@ -187,13 +187,13 @@ static void websocket_tx_task(void *arg)
             } else {
                 ESP_LOGI(TAG, "Setup Gemini terkirim: %d byte generation=%lu duration=%lldms", sent, (unsigned)cmd.generation, (long long)send_elapsed_ms);
             }
-            free(setup_json); free(audio_data); continue;
+            free(setup_json); heap_caps_free(audio_data); continue;
         }
         if (cmd.type == WS_TX_COMMAND_TEXT) {
-            if (!audio_data || cmd.len == 0) { free(audio_data); continue; }
+            if (!audio_data || cmd.len == 0) { heap_caps_free(audio_data); continue; }
             if (cmd.generation != websocket_connection_generation || !is_connected || websocket_tx_error ||
                 client != ws || !esp_websocket_client_is_connected(ws)) {
-                free(audio_data);
+                heap_caps_free(audio_data);
                 continue;
             }
             int sent = esp_websocket_client_send_text(ws, (const char *)audio_data, (int)cmd.len, pdMS_TO_TICKS(1000));
@@ -203,7 +203,7 @@ static void websocket_tx_task(void *arg)
                 ESP_LOGW(TAG, "Touch prompt TX gagal: sent=%d expected=%u", sent, (unsigned)cmd.len);
             else
                 ESP_LOGI(TAG, "Touch prompt terkirim ke Gemini: %u byte", (unsigned)cmd.len);
-            free(audio_data);
+            heap_caps_free(audio_data);
             continue;
         }
         if (cmd.type == WS_TX_COMMAND_AUDIO) {
@@ -223,7 +223,7 @@ static void websocket_tx_task(void *arg)
             }
             if (!b64_buf || !json_buf) {
                 ESP_LOGE(TAG, "TX buffer allocation gagal (base64/json)");
-                free(audio_data);
+                heap_caps_free(audio_data);
                 continue;
             }
             // 1280 PCM bytes = 40 ms at 16 kHz mono PCM16; reduces per-send overhead.
@@ -234,7 +234,7 @@ static void websocket_tx_task(void *arg)
             constexpr TickType_t AUDIO_SEND_TIMEOUT = pdMS_TO_TICKS(3000);
             constexpr TickType_t AUDIO_SEND_RETRY_DELAY = pdMS_TO_TICKS(30);
             constexpr int AUDIO_SEND_RETRIES = 1;
-            if (!audio_data || !cmd.len) { free(audio_data); continue; }
+            if (!audio_data || !cmd.len) { heap_caps_free(audio_data); continue; }
 
             size_t offset = 0;
             bool send_failed = false;
@@ -296,10 +296,10 @@ static void websocket_tx_task(void *arg)
                          (int)is_connected,
                          (int)esp_websocket_client_is_connected(ws));
             }
-            free(audio_data);
+            heap_caps_free(audio_data);
             continue;
         }
-        free(audio_data);
+        heap_caps_free(audio_data);
     }
 }
 
@@ -338,7 +338,11 @@ bool websocket_tx_enqueue_audio(const uint8_t *data, size_t len, uint32_t genera
         if (result) *result = WS_TX_ENQUEUE_GENERATION_MISMATCH;
         return false;
     }
-    uint8_t *copy = (uint8_t *)malloc(len);
+    uint8_t *copy = NULL;
+    if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0)
+        copy = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!copy)
+        copy = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!copy) {
         if (result) *result = WS_TX_ENQUEUE_MALLOC_FAILED;
         return false;
