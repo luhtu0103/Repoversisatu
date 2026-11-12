@@ -242,6 +242,10 @@ extern "C" esp_err_t speaker_id_enroll_named_pcm16(const int16_t *pcm, size_t sa
 }
 extern "C" esp_err_t speaker_id_request_enrollment(const char *name) {
     if (!name || !name[0] || strlen(name) >= sizeof(request_name)) return ESP_ERR_INVALID_ARG;
+    // A previous caller may have timed out while capture was already in progress.
+    // If that capture later completed, discard its unclaimed completion before
+    // accepting a new request so the enrollment API cannot remain stuck in state 3.
+    if (request_state == 3) request_state = 0;
     if (request_state != 0) return ESP_ERR_INVALID_STATE;
     strlcpy(request_name, name, sizeof(request_name));
     request_result = ESP_ERR_INVALID_STATE;
