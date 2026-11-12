@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "esp_websocket_client.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -81,6 +82,11 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
 
         case WEBSOCKET_EVENT_ERROR:
             ESP_LOGE(TAG, "WebSocket Error!");
+            ESP_LOGE(TAG, "HEAP at WS error: internal_free=%u internal_largest=%u psram_free=%u psram_largest=%u",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
             now_ms = (uint32_t)(esp_timer_get_time() / 1000);
             ESP_LOGE(TAG, "WS activity before error: connected=%d setup=%d tx_error=%d generation=%lu rx_age_ms=%lu tx_age_ms=%lu tx_fail_count=%lu",
                      (int)is_connected, (int)setup_complete, (int)websocket_tx_error,
