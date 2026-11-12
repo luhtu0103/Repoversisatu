@@ -391,14 +391,15 @@ void websocket_app_start(void)
     cfg.cert_common_name = "generativelanguage.googleapis.com";
     cfg.network_timeout_ms = 15000;
     cfg.disable_auto_reconnect = true;
-    /* Match RepoV3's transport keepalive policy. Keep Repo5's smaller TLS
-     * buffer to reduce internal-heap pressure on ESP32-S3. */
+    /* Keepalive helps detect dead peers. Use a 2048-byte WebSocket buffer
+     * to limit connection-side memory pressure on ESP32-S3; TX audio JSON
+     * is already chunked to stay below this size. */
     cfg.keep_alive_enable = true;
     cfg.keep_alive_idle = 30;
     cfg.keep_alive_interval = 10;
     cfg.keep_alive_count = 3;
-    cfg.buffer_size = 4096;
-    ESP_LOGI(TAG, "WS keepalive: TCP idle=30s interval=10s count=3; audio write timeout=3000ms retry=1");
+    cfg.buffer_size = 2048;
+    ESP_LOGI(TAG, "WS config: buffer=2048; TCP keepalive idle=30s interval=10s count=3; audio write timeout=3000ms retry=1");
     log_ws_heap("before_websocket_client_init");
 
     client = esp_websocket_client_init(&cfg);
