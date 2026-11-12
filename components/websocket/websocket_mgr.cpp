@@ -227,8 +227,8 @@ static void websocket_tx_task(void *arg)
                 heap_caps_free(audio_data);
                 continue;
             }
-            // 640 PCM bytes = 20 ms at 16 kHz mono PCM16. Smaller JSON frames
-            // reduce per-write buffering and limit the impact of TX backpressure.
+            // 1280 PCM bytes = 40 ms at 16 kHz mono PCM16. Sending the complete
+            // capture frame in one WebSocket write halves per-frame call overhead.
             constexpr size_t PCM_SEND_CHUNK = 1280;
             // Fail fast enough that a stalled socket cannot consume the
             // entire bounded microphone capture budget before TX recovery starts.
