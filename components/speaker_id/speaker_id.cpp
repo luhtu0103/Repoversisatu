@@ -6,6 +6,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 static const char *TAG = "SPEAKER_ID";
 static constexpr int SAMPLE_RATE = 16000;
@@ -66,8 +67,7 @@ extern "C" bool speaker_id_enroll_last(const char *name,char *result,size_t resu
     if(result&&result_len)result[0]=0;if(!name||!name[0]||strlen(name)>=SPEAKER_ID_NAME_MAX){if(result&&result_len)snprintf(result,result_len,"Nama profil tidak valid (maksimum %d karakter).",SPEAKER_ID_NAME_MAX-1);return false;}
     if(!initialized)speaker_id_init();if(ring_count<45){if(result&&result_len)snprintf(result,result_len,"Rekaman terlalu singkat; ucapkan nama dan kalimat selama sekitar 2 detik, lalu daftar ulang.");return false;}
     int idx=-1;for(size_t i=0;i<profile_count;i++)if(strcmp(profiles[i].name,name)==0){idx=(int)i;break;}if(idx<0){if(profile_count>=PROFILE_N){if(result&&result_len)snprintf(result,result_len,"Penyimpanan penuh; maksimum %d profil suara.",PROFILE_N);return false;}idx=(int)profile_count;}
-    profile_t p={};p.magic=PROFILE_MAGIC;p.count=(uint16_t)ring_count;strlcpy(p.name,name,sizeof(p.name));copy_recent(p.feat,(size_t*)&(size_t){0});
-    size_t n=0;copy_recent(p.feat,&n);p.count=(uint16_t)n;
+    profile_t p={};p.magic=PROFILE_MAGIC;strlcpy(p.name,name,sizeof(p.name));size_t n=0;copy_recent(p.feat,&n);p.count=(uint16_t)n;
     nvs_handle_t h;if(nvs_open("speaker_id",NVS_READWRITE,&h)!=ESP_OK){if(result&&result_len)snprintf(result,result_len,"NVS tidak bisa dibuka.");return false;}
     char key[8];snprintf(key,sizeof(key),"p%d",idx);esp_err_t e=nvs_set_blob(h,key,&p,sizeof(p));if(e==ESP_OK)e=nvs_commit(h);nvs_close(h);
     if(e!=ESP_OK){if(result&&result_len)snprintf(result,result_len,"Gagal menyimpan profil ke flash NVS (kode %d).",(int)e);return false;}
