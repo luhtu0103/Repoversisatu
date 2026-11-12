@@ -28,7 +28,8 @@ static int16_t sample_tail[FRAME_N];
 static size_t tail_count = 0;
 static int16_t ring_feat[SEQ_N][MFCC_N];
 static size_t ring_write = 0, ring_count = 0;
-static int64_t last_identify_us = 0;
+static size_t silence_samples = 0;
+static bool was_speech = false;
 static bool initialized = false;
 static float re[FFT_N], im[FFT_N], mel_edges[MEL_N + 2];
 
@@ -57,8 +58,12 @@ extern "C" void speaker_id_init(void) {
 }
 extern "C" void speaker_id_process_pcm(const int16_t *pcm,size_t samples) {
     if(!pcm||!samples)return;if(!initialized)speaker_id_init();
-    for(size_t i=0;i<samples;i++){int16_t s=pcm[i];if(tail_count<FRAME_N)sample_tail[tail_count++]=s;else{memmove(sample_tail,sample_tail+1,(FRAME_N-1)*sizeof(int16_t));sample_tail[FRAME_N-1]=s;}
-        frame_buf[frame_fill++]=s;if(frame_fill==FRAME_N){push_feature(frame_buf);memmove(frame_buf,frame_buf+HOP_N,(FRAME_N-HOP_N)*sizeof(int16_t));frame_fill=FRAME_N-HOP_N;}}
+    uint64_t energy=0;for(size_t i=0;i<samples;i++){int32_t v=pcm[i];energy+=(uint64_t)(v*v);}
+    float rms=sqrtf((float)energy/(float)samples);
+    if(rms<220.0f){silence_samples+=samples;if(silence_samples>2400)was_speech=false;return;}
+    if(!was_speech && silence_samples>2400){ring_count=0;ring_write=0;frame_fill=0;}
+    was_speech=true;silence_samples=0;
+    for(size_t i=0;i<samples;i++){int16_t s=pcm[i];frame_buf[frame_fill++]=s;if(frame_fill==FRAME_N){push_feature(frame_buf);memmove(frame_buf,frame_buf+HOP_N,(FRAME_N-HOP_N)*sizeof(int16_t));frame_fill=FRAME_N-HOP_N;}}
 }
 static void copy_recent(int16_t dst[SEQ_N][MFCC_N],size_t *n) {
     *n=ring_count;size_t start=(ring_write+SEQ_N-ring_count)%SEQ_N;for(size_t i=0;i<ring_count;i++)memcpy(dst[i],ring_feat[(start+i)%SEQ_N],sizeof(dst[i]));
@@ -81,7 +86,6 @@ static float dtw_distance(const int16_t a[SEQ_N][MFCC_N],size_t na,const int16_t
 }
 extern "C" bool speaker_id_identify(char *name,size_t name_len,float *distance_out) {
     if(name&&name_len)name[0]=0;if(distance_out)*distance_out=0;if(!initialized)speaker_id_init();
-    int64_t now=esp_timer_get_time();if(now-last_identify_us<1500000)return false;last_identify_us=now;
     if(ring_count<45||profile_count==0)return false;int16_t current[SEQ_N][MFCC_N];size_t n=0;copy_recent(current,&n);float best=1e30f;int winner=-1;
     /* Compare every second frame to bound DTW cost on the ESP32-S3. */
     int16_t down[80][MFCC_N];size_t dn=0;for(size_t i=0;i<n;i+=2){memcpy(down[dn++],current[i],sizeof(down[0]));}
