@@ -207,6 +207,16 @@ static void add_memory_tools(cJSON *setup)
         }
         cJSON_AddItemToArray(function_declarations, decl);
     }
+    cJSON *verify_decl = cJSON_CreateObject();
+    if (verify_decl) {
+        cJSON_AddStringToObject(verify_decl, "name", "speaker_verify");
+        cJSON_AddStringToObject(verify_decl, "behavior", "BLOCKING");
+        cJSON_AddStringToObject(verify_decl, "description", "Jalankan verifikasi diagnostik suara hanya jika pengguna secara eksplisit meminta verifikasi/cek suaranya. Sistem merekam 2,4 detik dan membandingkan MFCC+DTW dengan template terdaftar. Hasil hanya skor jarak, bukan keputusan identitas. Jangan menyebut pengguna cocok/tidak cocok; laporkan bahwa hasil berupa skor eksperimental.");
+        cJSON *params = cJSON_AddObjectToObject(verify_decl, "parameters");
+        cJSON_AddStringToObject(params, "type", "OBJECT");
+        cJSON_AddObjectToObject(params, "properties");
+        cJSON_AddItemToArray(function_declarations, verify_decl);
+    }
     cJSON *speaker_decl = cJSON_CreateObject();
     if (speaker_decl) {
         cJSON_AddStringToObject(speaker_decl, "name", "speaker_enroll");
@@ -453,6 +463,14 @@ static void remember_user_transcript(const char *text)
         pending_explicit_memory_delete = true;
         ESP_LOGI(TAG, "AI_MEMORY: izin hapus eksplisit terdeteksi pada transkrip pengguna");
     }
+    static const char *const verify_no[] = { "jangan verifikasi suara", "batal verifikasi suara", "tidak jadi verifikasi suara" };
+    static const char *const verify_yes[] = { "verifikasi suaraku", "verifikasi suara saya", "cek suara saya", "periksa suara saya" };
+    if (transcript_has_any(latest_user_transcript, verify_no, sizeof(verify_no) / sizeof(verify_no[0])))
+        pending_explicit_speaker_verify = false;
+    else if (transcript_has_any(latest_user_transcript, verify_yes, sizeof(verify_yes) / sizeof(verify_yes[0]))) {
+        pending_explicit_speaker_verify = true;
+        ESP_LOGI(TAG, "SPEAKER_ID: permintaan verifikasi eksplisit terdeteksi");
+    }
     static const char *const enroll_no[] = { "jangan daftarkan suara", "jangan daftarkan suaraku", "batal daftar suara", "tidak jadi daftar suara" };
     static const char *const enroll_yes[] = { "daftarkan suaraku", "daftarkan suara saya", "daftarkan suara", "tolong daftarkan suara" };
     if (transcript_has_any(latest_user_transcript, enroll_no, sizeof(enroll_no) / sizeof(enroll_no[0])))
@@ -501,7 +519,30 @@ static void process_gemini_tool_call(cJSON *tool_call)
         ESP_LOGI(TAG, "Gemini TOOL CALL: %s id=%s", name->valuestring, id->valuestring);
 
         bool success = false;
-        if (strcmp(name->valuestring, "speaker_enroll") == 0) {
+        if (strcmp(name->valuestring, "speaker_verify") == 0) {
+            if (!pending_explicit_speaker_verify) {
+                (void)websocket_send_tool_response_text(id->valuestring, name->valuestring, "Ditolak: verifikasi suara hanya boleh dimulai atas permintaan eksplisit pengguna.");
+                continue;
+            }
+            pending_explicit_speaker_verify = false;
+            if (!speaker_id_has_template()) {
+                (void)websocket_send_tool_response_text(id->valuestring, name->valuestring, "Belum ada template suara. Daftarkan suara terlebih dahulu.");
+                continue;
+            }
+            float distance = 0.0f;
+            esp_err_t verify_err = speaker_id_request_verification(&distance);
+            if (verify_err == ESP_OK) {
+                char result_text[160];
+                snprintf(result_text, sizeof(result_text), "Verifikasi diagnostik selesai. Skor jarak MFCC-DTW = %.5f. Skor ini belum memiliki ambang terkalibrasi dan tidak membuktikan identitas.", (double)distance);
+                ESP_LOGI(TAG, "speaker_verify distance=%.5f (diagnostik saja)", (double)distance);
+                (void)websocket_send_tool_response_text(id->valuestring, name->valuestring, result_text);
+            } else {
+                char result_text[128];
+                snprintf(result_text, sizeof(result_text), "Verifikasi gagal: %s. Silakan coba lagi.", esp_err_to_name(verify_err));
+                (void)websocket_send_tool_response_text(id->valuestring, name->valuestring, result_text);
+            }
+            continue;
+        } else if (strcmp(name->valuestring, "speaker_enroll") == 0) {
             cJSON *speaker_name = cJSON_GetObjectItem(args, "name");
             if (!pending_explicit_speaker_enroll) {
                 (void)websocket_send_tool_response_text(id->valuestring, name->valuestring, "Ditolak: pendaftaran suara hanya boleh dimulai atas permintaan eksplisit pengguna.");
@@ -768,6 +809,7 @@ void process_gemini_message(const char *json, size_t len)
             pending_explicit_memory_delete = false;
             /* Speaker enrollment authorization is scoped to this user turn too. */
             pending_explicit_speaker_enroll = false;
+            pending_explicit_speaker_verify = false;
             if (standby_after_turn_complete) {
                 standby_after_turn_complete = false;
                 ESP_LOGI(TAG, "STANDBY: balasan Gemini selesai dibuat; menunggu audio selesai diputar");
