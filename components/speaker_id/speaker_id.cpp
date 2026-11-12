@@ -32,7 +32,11 @@ bool initialized = false;
 float reference_features[kMaxFrames][kCoeffs];
 int reference_count = 0;
 constexpr uint32_t kTemplateMagic = 0x53494431U;
-struct PersistedTemplate { uint32_t magic; uint32_t count; char name[32]; float features[kMaxFrames][kCoeffs]; };
+struct PersistedTemplateHeader { uint32_t magic; uint32_t count; char name[32]; };
+constexpr size_t kTemplateHeaderSize = sizeof(PersistedTemplateHeader);
+constexpr size_t template_blob_size(size_t count) {
+    return kTemplateHeaderSize + count * kCoeffs * sizeof(float);
+}
 char enrolled_name[32] = {};
 volatile int request_state = 0;
 char request_name[32] = {};
@@ -193,17 +197,50 @@ extern "C" esp_err_t speaker_id_init(void) {
     if (!initialized) initialize_tables();
     nvs_handle_t h;
     if (nvs_open("speaker_id", NVS_READONLY, &h) == ESP_OK) {
-        PersistedTemplate *p = (PersistedTemplate *)malloc(sizeof(PersistedTemplate));
-        if (p) {
-            size_t size = sizeof(PersistedTemplate);
-            esp_err_t e = nvs_get_blob(h, "template", p, &size);
-            if (e == ESP_OK && size == sizeof(PersistedTemplate) && p->magic == kTemplateMagic && p->count > 0 && p->count <= kMaxFrames && p->name[0]) {
-                reference_count = (int)p->count;
-                memcpy(reference_features, p->features, reference_count * kCoeffs * sizeof(float));
-                strlcpy(enrolled_name, p->name, sizeof(enrolled_name));
-                ESP_LOGI(TAG, "Template NVS dimuat: %s", enrolled_name);
+        size_t blob_size = 0;
+        esp_err_t e = nvs_get_blob(h, "template", nullptr, &blob_size);
+        if (e == ESP_OK && blob_size >= kTemplateHeaderSize) {
+            PersistedTemplateHeader header = {};
+            size_t header_size = sizeof(header);
+            e = nvs_get_blob(h, "template", &header, &header_size);
+            const size_t expected_size = template_blob_size(header.count);
+            if (e == ESP_OK && header.magic == kTemplateMagic &&
+                header.count > 0 && header.count <= kMaxFrames &&
+                header.name[0] && blob_size == expected_size) {
+                float *features = (float *)heap_caps_malloc(
+                    header.count * kCoeffs * sizeof(float),
+                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (!features) features = (float *)malloc(
+                    header.count * kCoeffs * sizeof(float));
+                if (features) {
+                    // Read only the feature payload; the header was validated above.
+                    e = nvs_get_blob(h, "template", nullptr, &blob_size);
+                    uint8_t *blob = (uint8_t *)malloc(blob_size);
+                    if (blob) {
+                        e = nvs_get_blob(h, "template", blob, &blob_size);
+                        if (e == ESP_OK) {
+                            memcpy(features, blob + kTemplateHeaderSize,
+                                   header.count * kCoeffs * sizeof(float));
+                            reference_count = (int)header.count;
+                            memcpy(reference_features, features,
+                                   reference_count * kCoeffs * sizeof(float));
+                            strlcpy(enrolled_name, header.name, sizeof(enrolled_name));
+                            ESP_LOGI(TAG, "Template NVS dimuat: %s (%d frame, %u byte)",
+                                     enrolled_name, reference_count, (unsigned)blob_size);
+                        }
+                        free(blob);
+                    }
+                    heap_caps_free(features);
+                } else {
+                    ESP_LOGW(TAG, "RAM tidak cukup untuk memuat template speaker (%u byte)",
+                             (unsigned)(header.count * kCoeffs * sizeof(float)));
+                }
+            } else {
+                ESP_LOGW(TAG, "Template NVS tidak valid: err=%s size=%u count=%u",
+                         esp_err_to_name(e), (unsigned)blob_size, (unsigned)header.count);
             }
-            free(p);
+        } else if (e != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "Gagal membaca ukuran template NVS: %s", esp_err_to_name(e));
         }
         nvs_close(h);
     }
@@ -220,15 +257,22 @@ extern "C" esp_err_t speaker_id_enroll_named_pcm16(const int16_t *pcm, size_t sa
     int count = 0;
     esp_err_t err = extract_features(pcm, samples, current_features, &count);
     if (err != ESP_OK) return err;
-    PersistedTemplate *p = (PersistedTemplate *)calloc(1, sizeof(PersistedTemplate));
-    if (!p) return ESP_ERR_NO_MEM;
-    p->magic = kTemplateMagic; p->count = (uint32_t)count;
-    strlcpy(p->name, name, sizeof(p->name));
-    memcpy(p->features, current_features, count * kCoeffs * sizeof(float));
+    const size_t blob_size = template_blob_size((size_t)count);
+    uint8_t *blob = (uint8_t *)heap_caps_calloc(
+        1, blob_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!blob) blob = (uint8_t *)calloc(1, blob_size);
+    if (!blob) return ESP_ERR_NO_MEM;
+    PersistedTemplateHeader header = {};
+    header.magic = kTemplateMagic;
+    header.count = (uint32_t)count;
+    strlcpy(header.name, name, sizeof(header.name));
+    memcpy(blob, &header, sizeof(header));
+    memcpy(blob + kTemplateHeaderSize, current_features,
+           count * kCoeffs * sizeof(float));
     nvs_handle_t h;
     err = nvs_open("speaker_id", NVS_READWRITE, &h);
     if (err == ESP_OK) {
-        err = nvs_set_blob(h, "template", p, sizeof(PersistedTemplate));
+        err = nvs_set_blob(h, "template", blob, blob_size);
         if (err == ESP_OK) err = nvs_commit(h);
         nvs_close(h);
     }
@@ -236,9 +280,10 @@ extern "C" esp_err_t speaker_id_enroll_named_pcm16(const int16_t *pcm, size_t sa
         memcpy(reference_features, current_features, count * kCoeffs * sizeof(float));
         reference_count = count;
         strlcpy(enrolled_name, name, sizeof(enrolled_name));
-        ESP_LOGI(TAG, "Template suara '%s' tersimpan di NVS (%d frame)", name, count);
+        ESP_LOGI(TAG, "Template suara '%s' tersimpan di NVS (%d frame, %u byte)",
+                 name, count, (unsigned)blob_size);
     } else ESP_LOGE(TAG, "Gagal menyimpan template NVS: %s", esp_err_to_name(err));
-    free(p);
+    heap_caps_free(blob);
     return err;
 }
 extern "C" esp_err_t speaker_id_request_enrollment(const char *name) {
