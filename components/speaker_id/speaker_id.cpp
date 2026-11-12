@@ -51,6 +51,8 @@ typedef struct {
     int16_t pcm[AUDIO_FRAME_MAX_SAMPLES];
 } speaker_audio_frame_t;
 static QueueHandle_t audio_queue = nullptr;
+static QueueHandle_t audio_free_queue = nullptr;
+static speaker_audio_frame_t audio_frames[AUDIO_QUEUE_DEPTH];
 static TaskHandle_t audio_worker_handle = nullptr;
 
 static float fft_re[FFT_N];
@@ -223,10 +225,26 @@ extern "C" void speaker_id_init(void)
     }
     load_profiles();
 
-    audio_queue = xQueueCreate(AUDIO_QUEUE_DEPTH, sizeof(speaker_audio_frame_t));
-    if (audio_queue == nullptr) {
+    audio_queue = xQueueCreate(AUDIO_QUEUE_DEPTH, sizeof(speaker_audio_frame_t *));
+    audio_free_queue = xQueueCreate(AUDIO_QUEUE_DEPTH, sizeof(speaker_audio_frame_t *));
+    if (audio_queue == nullptr || audio_free_queue == nullptr) {
         ESP_LOGE(TAG, "Gagal membuat antrean audio; pengenalan suara dinonaktifkan");
+        if (audio_queue != nullptr) vQueueDelete(audio_queue);
+        if (audio_free_queue != nullptr) vQueueDelete(audio_free_queue);
+        audio_queue = nullptr;
+        audio_free_queue = nullptr;
         return;
+    }
+    for (size_t i = 0; i < AUDIO_QUEUE_DEPTH; ++i) {
+        speaker_audio_frame_t *frame = &audio_frames[i];
+        if (xQueueSend(audio_free_queue, &frame, 0) != pdTRUE) {
+            ESP_LOGE(TAG, "Gagal menyiapkan pool audio speaker ID");
+            vQueueDelete(audio_queue);
+            vQueueDelete(audio_free_queue);
+            audio_queue = nullptr;
+            audio_free_queue = nullptr;
+            return;
+        }
     }
     const BaseType_t task_result = xTaskCreatePinnedToCore(
         speaker_id_audio_worker, "speaker_id", 6144, nullptr, 3,
@@ -234,7 +252,9 @@ extern "C" void speaker_id_init(void)
     if (task_result != pdPASS) {
         ESP_LOGE(TAG, "Gagal membuat task speaker ID; pengenalan suara dinonaktifkan");
         vQueueDelete(audio_queue);
+        vQueueDelete(audio_free_queue);
         audio_queue = nullptr;
+        audio_free_queue = nullptr;
         return;
     }
     ESP_LOGI(TAG, "Worker MFCC-DTW aktif di task terpisah");
@@ -281,11 +301,13 @@ static void process_pcm_internal(const int16_t *pcm, size_t samples)
 static void speaker_id_audio_worker(void *arg)
 {
     (void)arg;
-    speaker_audio_frame_t frame;
+    speaker_audio_frame_t *frame = nullptr;
     for (;;) {
-        if (xQueueReceive(audio_queue, &frame, portMAX_DELAY) == pdTRUE &&
-            frame.samples > 0 && frame.samples <= AUDIO_FRAME_MAX_SAMPLES) {
-            process_pcm_internal(frame.pcm, frame.samples);
+        if (xQueueReceive(audio_queue, &frame, portMAX_DELAY) == pdTRUE && frame != nullptr) {
+            if (frame->samples > 0 && frame->samples <= AUDIO_FRAME_MAX_SAMPLES) {
+                process_pcm_internal(frame->pcm, frame->samples);
+            }
+            (void)xQueueSend(audio_free_queue, &frame, portMAX_DELAY);
         }
     }
 }
@@ -300,10 +322,15 @@ extern "C" void speaker_id_process_pcm(const int16_t *pcm, size_t samples)
         samples = AUDIO_FRAME_MAX_SAMPLES;
     }
 
-    speaker_audio_frame_t frame = {};
-    frame.samples = static_cast<uint16_t>(samples);
-    memcpy(frame.pcm, pcm, samples * sizeof(int16_t));
-    (void)xQueueSend(audio_queue, &frame, 0);
+    speaker_audio_frame_t *frame = nullptr;
+    if (xQueueReceive(audio_free_queue, &frame, 0) != pdTRUE || frame == nullptr) {
+        return;
+    }
+    frame->samples = static_cast<uint16_t>(samples);
+    memcpy(frame->pcm, pcm, samples * sizeof(int16_t));
+    if (xQueueSend(audio_queue, &frame, 0) != pdTRUE) {
+        (void)xQueueSend(audio_free_queue, &frame, 0);
+    }
 }
 
 static void copy_recent(int16_t dst[SEQ_N][MFCC_N], size_t *count)
