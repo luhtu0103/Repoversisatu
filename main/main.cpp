@@ -46,17 +46,33 @@ static volatile bool speaker_capture_active = false;
 static volatile bool speaker_busy = false;
 static size_t speaker_capture_pos = 0;
 static char speaker_capture_name[32] = {};
+static bool speaker_capture_verify = false;
 static void speaker_process_task(void *arg) {
     (void)arg;
-    esp_err_t err = speaker_id_enroll_named_pcm16(speaker_capture_pcm, SPEAKER_CAPTURE_SAMPLES, speaker_capture_name);
-    if (err == ESP_OK) {
-        ESP_LOGI("SPEAKER_ID", "Pendaftaran '%s' berhasil dan tersimpan di NVS", speaker_capture_name);
-        display_status("Suara tersimpan");
+    esp_err_t err;
+    float distance = 0.0f;
+    if (speaker_capture_verify) {
+        err = speaker_id_compare_pcm16(speaker_capture_pcm, SPEAKER_CAPTURE_SAMPLES, &distance);
+        if (err == ESP_OK) {
+            ESP_LOGI("SPEAKER_ID", "Verifikasi diagnostik selesai: DTW distance=%.5f; belum ada ambang keputusan", (double)distance);
+            display_status("Cek suara selesai");
+        } else {
+            ESP_LOGW("SPEAKER_ID", "Verifikasi gagal: %s", esp_err_to_name(err));
+            display_status("Cek suara gagal");
+        }
+        speaker_id_complete_verification(err, distance);
+        speaker_capture_verify = false;
     } else {
-        ESP_LOGW("SPEAKER_ID", "Pendaftaran gagal: %s", esp_err_to_name(err));
-        display_status("Daftar suara gagal");
+        err = speaker_id_enroll_named_pcm16(speaker_capture_pcm, SPEAKER_CAPTURE_SAMPLES, speaker_capture_name);
+        if (err == ESP_OK) {
+            ESP_LOGI("SPEAKER_ID", "Pendaftaran '%s' berhasil dan tersimpan di NVS", speaker_capture_name);
+            display_status("Suara tersimpan");
+        } else {
+            ESP_LOGW("SPEAKER_ID", "Pendaftaran gagal: %s", esp_err_to_name(err));
+            display_status("Daftar suara gagal");
+        }
+        speaker_id_complete_enrollment(err);
     }
-    speaker_id_complete_enrollment(err);
     speaker_busy = false;
     vTaskDelete(nullptr);
 }
@@ -364,9 +380,19 @@ static void audio_task(void *arg)
         }
 
         char enrollment_name[32] = {};
-        if (!speaker_capture_active && !speaker_busy &&
-            speaker_id_take_enrollment_request(enrollment_name, sizeof(enrollment_name)))
-            speaker_capture_start(enrollment_name);
+        if (!speaker_capture_active && !speaker_busy) {
+            if (speaker_id_take_enrollment_request(enrollment_name, sizeof(enrollment_name))) {
+                speaker_capture_verify = false;
+                speaker_capture_start(enrollment_name);
+            } else if (speaker_id_take_verification_request()) {
+                speaker_capture_pos = 0;
+                speaker_busy = true;
+                speaker_capture_verify = true;
+                speaker_capture_active = true;
+                ESP_LOGI("SPEAKER_ID", "Verifikasi diagnostik: silakan bicara 2,4 detik");
+                display_status("Cek suara: bicara");
+            }
+        }
 
         // Capture from the same microphone read already feeding Gemini.
         if (!mic_buffer_full && bytes_read > 0 &&
