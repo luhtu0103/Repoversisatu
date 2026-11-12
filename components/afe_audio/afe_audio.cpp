@@ -8,6 +8,7 @@
 #include "esp_nsn_models.h"
 #include "model_path.h"
 #include "freertos/FreeRTOS.h"
+#include "esp_timer.h"
 
 #include <string.h>
 
@@ -21,6 +22,8 @@ static size_t fetch_samples = 0;
 static bool ready = false;
 static uint32_t feed_fail_count = 0;
 static uint32_t fetch_fail_count = 0;
+static uint32_t feed_ok_count = 0;
+static uint32_t fetch_ok_count = 0;
 
 bool afe_audio_init(void)
 {
@@ -137,6 +140,7 @@ size_t afe_audio_process_frame(const int16_t *input,
         return 0;
     }
 
+    const int64_t fetch_start_us = esp_timer_get_time();
     int feed_result = afe_handle->feed(afe_data, input);
     if (feed_result < 0) {
         ++feed_fail_count;
@@ -145,13 +149,21 @@ size_t afe_audio_process_frame(const int16_t *input,
         return 0;
     }
 
-    // Bound AFE waiting time so microphone capture cannot stall for a quarter-second.
-    // A missing frame falls back to raw PCM in audio_hal instead of blocking the live pipeline.
+    ++feed_ok_count;
+    // Keep the wait bounded: a missing frame falls back to raw PCM rather than
+    // blocking the live microphone pipeline indefinitely.
     afe_fetch_result_t *result = afe_handle->fetch_with_delay(afe_data, pdMS_TO_TICKS(40));
+    const int64_t fetch_elapsed_us = esp_timer_get_time() - fetch_start_us;
     if (!result || result->ret_value == ESP_FAIL || !result->data || result->data_size <= 0) {
         ++fetch_fail_count;
-        if (fetch_fail_count == 1 || (fetch_fail_count % 50U) == 0)
-            ESP_LOGW(TAG, "AFE fetch failed or returned no audio (count=%lu)", (unsigned long)fetch_fail_count);
+        if (fetch_fail_count == 1 || (fetch_fail_count % 25U) == 0) {
+            const int ret_value = result ? result->ret_value : -999;
+            const int data_size = result ? result->data_size : -1;
+            ESP_LOGW(TAG, "AFE fetch no audio: count=%lu feed_ok=%lu fetch_ok=%lu result=%s ret=%d data_size=%d wait=%lldms",
+                     (unsigned long)fetch_fail_count, (unsigned long)feed_ok_count,
+                     (unsigned long)fetch_ok_count, result ? "present" : "null",
+                     ret_value, data_size, (long long)(fetch_elapsed_us / 1000));
+        }
         return 0;
     }
 
@@ -163,5 +175,11 @@ size_t afe_audio_process_frame(const int16_t *input,
     }
 
     memcpy(output, result->data, output_samples * sizeof(int16_t));
+    ++fetch_ok_count;
+    if (fetch_ok_count == 1 || (fetch_ok_count % 250U) == 0)
+        ESP_LOGI(TAG, "AFE pipeline: feed_ok=%lu fetch_ok=%lu input=%u output=%u wait=%lldms",
+                 (unsigned long)feed_ok_count, (unsigned long)fetch_ok_count,
+                 (unsigned)input_samples, (unsigned)output_samples,
+                 (long long)(fetch_elapsed_us / 1000));
     return output_samples;
 }
