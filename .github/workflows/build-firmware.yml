@@ -39,6 +39,9 @@ jobs:
           grep -q '^CONFIG_PARTITION_TABLE_CUSTOM=y' sdkconfig.defaults
           grep -q '^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/partitions.csv"' sdkconfig.defaults
           grep -q '^CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y' sdkconfig.defaults
+          grep -q '^CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y' sdkconfig.defaults
+          grep -q '^CONFIG_SPIRAM=y' sdkconfig.defaults
+          grep -q '^CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=98304' sdkconfig.defaults
           grep -q '^model,.*0x410000,0x400000' partitions/partitions.csv
 
       - name: Configure ESP-IDF target
@@ -58,6 +61,11 @@ jobs:
           grep -q '^CONFIG_PARTITION_TABLE_CUSTOM=y' sdkconfig
           grep -q '^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/partitions.csv"' sdkconfig
           grep -q '^CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y' sdkconfig
+          # Fail CI if the intended TLS/PSRAM settings from sdkconfig.defaults
+          # are not present in the effective ESP-IDF configuration.
+          grep -q '^CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y' sdkconfig
+          grep -q '^CONFIG_SPIRAM=y' sdkconfig
+          grep -q '^CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=98304' sdkconfig
           test -s build/Repoversiempat.bin
           test -s build/Repoversiempat.elf
           test -s build/bootloader/bootloader.bin
