@@ -27,6 +27,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends git zip
           python --version
+          . /opt/esp/idf/export.sh
           idf.py --version
 
       - name: Validate Repo5 build inputs
@@ -41,10 +42,14 @@ jobs:
           grep -q '^model,.*0x410000,0x400000' partitions/partitions.csv
 
       - name: Configure ESP-IDF target
-        run: idf.py set-target esp32s3
+        run: |
+          . /opt/esp/idf/export.sh
+          idf.py set-target esp32s3
 
       - name: Build firmware
-        run: idf.py build
+        run: |
+          . /opt/esp/idf/export.sh
+          idf.py build
 
       - name: Verify effective configuration and outputs
         run: |
