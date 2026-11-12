@@ -51,6 +51,19 @@ static void speaker_process_task(void *arg) {
     (void)arg;
     esp_err_t err;
     float distance = 0.0f;
+    uint64_t energy_sum = 0;
+    for (size_t i = 0; i < SPEAKER_CAPTURE_SAMPLES; ++i) {
+        const int32_t sample = speaker_capture_pcm[i];
+        energy_sum += (uint64_t)(sample * sample);
+    }
+    const float capture_rms = (float)sqrt((double)energy_sum / SPEAKER_CAPTURE_SAMPLES);
+    ESP_LOGI("SPEAKER_ID", "PCM siap diproses: samples=%u durasi_ms=%u RMS=%.1f internal_free=%u internal_largest=%u psram_free=%u",
+             (unsigned)SPEAKER_CAPTURE_SAMPLES,
+             (unsigned)(SPEAKER_CAPTURE_SAMPLES * 1000U / 16000U),
+             (double)capture_rms,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (speaker_capture_verify) {
         err = speaker_id_compare_pcm16(speaker_capture_pcm, SPEAKER_CAPTURE_SAMPLES, &distance);
         if (err == ESP_OK) {
@@ -424,7 +437,9 @@ static void audio_task(void *arg)
                     }
                     ESP_LOGE("SPEAKER_ID", "Gagal membuat task pemrosesan");
                 } else {
-                    ESP_LOGI("SPEAKER_ID", "Audio terkumpul; memproses MFCC + DTW");
+                    ESP_LOGI("SPEAKER_ID", "Audio terkumpul: samples=%u bytes=%u; MFCC + DTW dimulai",
+                             (unsigned)speaker_capture_pos,
+                             (unsigned)(speaker_capture_pos * sizeof(int16_t)));
                 }
             }
         }
