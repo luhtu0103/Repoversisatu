@@ -11,7 +11,7 @@ It uses no neural-network model and does not need an internet connection.
 ## Input requirements
 - Mono, signed PCM16
 - 16,000 samples/second
-- Prefer 1-3 seconds of speech per recording
+- Prefer 2-3 seconds of clear speech per recording
 - Avoid clipping, silence, music and strong background noise
 
 ## API usage
@@ -28,7 +28,7 @@ In an active Gemini Live session, say something explicit such as:
 
 > “Daftarkan suaraku, namaku Bos.”
 
-Gemini invokes the blocking `speaker_enroll` tool only after the transcript is recognized as an explicit enrollment request. The device captures approximately 1.2 seconds from the already-running microphone path, extracts MFCC features, and stores the name and template in NVS. Gemini receives success only after the NVS commit succeeds.
+Gemini invokes the blocking `speaker_enroll` tool only after the transcript is recognized as an explicit enrollment request. The device captures approximately 2.4 seconds from the already-running microphone path, extracts MFCC features, and stores the name and template in NVS. Gemini receives success only after the NVS commit succeeds.
 
 BOOT is not an enrollment or comparison trigger. A short BOOT press retains its existing behavior of starting a Gemini session. The application must not start a second I2S reader.
 
@@ -36,6 +36,8 @@ BOOT is not an enrollment or comparison trigger. A short BOOT press retains its 
 
 - This is a baseline MFCC + DTW experiment, not a validated speaker-verification model.
 - The DTW distance is uncalibrated and does not prove identity. Do not use it alone for access control.
+- Existing saved templates created with the previous 120-frame format will not load after this format change; enroll the voice again once after updating firmware.
 - Test different recordings, distances, languages, and background-noise conditions before relying on comparisons.
 - The direct DFT is CPU-intensive compared with an optimized FFT implementation.
+- The firmware exposes comparison scores only as experimental data; no calibrated accept/reject threshold is enabled. Do not use this feature for access control.
 - Firmware compilation and hardware testing are still required.
