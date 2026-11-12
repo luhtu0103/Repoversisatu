@@ -211,7 +211,7 @@ static void add_memory_tools(cJSON *setup)
     if (speaker_decl) {
         cJSON_AddStringToObject(speaker_decl, "name", "speaker_enroll");
         cJSON_AddStringToObject(speaker_decl, "behavior", "BLOCKING");
-        cJSON_AddStringToObject(speaker_decl, "description", "Daftarkan identitas suara hanya setelah pengguna secara eksplisit meminta, misalnya 'daftarkan suaraku, namaku Bos'. Sistem merekam 1,2 detik dari mikrofon aktif dan menyimpan template ke NVS. Jangan panggil untuk percakapan biasa. Tunggu hasil sebelum mengonfirmasi berhasil.");
+        cJSON_AddStringToObject(speaker_decl, "description", "Daftarkan identitas suara hanya setelah pengguna secara eksplisit meminta, misalnya 'daftarkan suaraku, namaku Bos'. Sistem merekam sekitar 2,4 detik dari mikrofon aktif dan menyimpan template ke NVS. Jangan panggil untuk percakapan biasa. Tunggu hasil sebelum mengonfirmasi berhasil.");
         cJSON *params = cJSON_AddObjectToObject(speaker_decl, "parameters");
         cJSON_AddStringToObject(params, "type", "OBJECT");
         cJSON *props = cJSON_AddObjectToObject(params, "properties");
