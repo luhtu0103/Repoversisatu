@@ -57,11 +57,12 @@ static void log_ws_heap(const char *stage)
 {
     size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     size_t internal_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    size_t internal_min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     size_t psram_largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    ESP_LOGI(TAG, "HEAP[%s]: internal_free=%u internal_largest=%u psram_free=%u psram_largest=%u",
+    ESP_LOGI(TAG, "HEAP[%s]: internal_free=%u internal_largest=%u internal_min_free=%u psram_free=%u psram_largest=%u",
              stage, (unsigned)internal_free, (unsigned)internal_largest,
-             (unsigned)psram_free, (unsigned)psram_largest);
+             (unsigned)internal_min_free, (unsigned)psram_free, (unsigned)psram_largest);
 }
 
 void websocket_tx_flush_queue(void)
@@ -353,7 +354,7 @@ bool websocket_tx_enqueue_audio(const uint8_t *data, size_t len, uint32_t genera
     /* Preserve queued PCM on backpressure. The caller retains and retries this
      * frame when enqueue fails, instead of silently evicting older audio. */
     if (xQueueSend(websocket_tx_queue, &cmd, 0) != pdTRUE) {
-        free(copy);
+        heap_caps_free(copy);
         if (result) *result = WS_TX_ENQUEUE_QUEUE_FULL;
         return false;
     }
