@@ -33,6 +33,11 @@ esp_err_t speaker_id_request_enrollment(const char *name);
 int speaker_id_take_enrollment_request(char *name_out, size_t name_out_size);
 void speaker_id_complete_enrollment(esp_err_t result);
 
+/* Explicit diagnostic verification; returns DTW distance, not an identity decision. */
+esp_err_t speaker_id_request_verification(float *out_distance);
+int speaker_id_take_verification_request(void);
+void speaker_id_complete_verification(esp_err_t result, float distance);
+
 #ifdef __cplusplus
 }
 #endif
