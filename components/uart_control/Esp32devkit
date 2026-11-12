@@ -1,0 +1,839 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <IRremoteESP8266.h>
+#include <IRsend.h>
+#include <time.h>
+#include <math.h>
+#include <Preferences.h>
+
+// =====================================================
+// WIFI CONFIGURATION
+// =====================================================
+const char* ssid = "Qrick WiFi";
+const char* password = "1komalima";
+
+// =====================================================
+// PIN DEFINITIONS
+// =====================================================
+const int PIN_LED_FISIK = 2;
+const int PIN_BUZZER = 5;
+const int PIN_LDR = 34;
+const int PIN_NTC = 35;
+const int PIN_IR_LED = 4;
+
+IRsend irsend(PIN_IR_LED);
+
+// =====================================================
+// GLOBAL STATE
+// =====================================================
+float dataSuhu = 0.0;
+bool statusRelay1 = false;   // colokan
+bool statusRelay2 = false;   // colokan panjang
+bool statusRelay3 = false;   // saklar lampu
+bool statusRelay4 = false;   // power MP3
+bool statusKipas  = false;   // kipas
+
+// tracking "sudah diketahui setelah restart"
+bool statusRelay1Diketahui = false;
+bool statusRelay2Diketahui = false;
+bool statusRelay3Diketahui = false;
+
+// =====================================================
+// OLED STATE
+// =====================================================
+bool sudahKirimMatiOLED = false;
+bool sudahKirimBangunOLED = false;
+time_t waktuOLEDTerakhir = 0;
+
+// =====================================================
+// IR CODES
+// =====================================================
+const uint32_t kodeLagu[] = {
+  0x00FF6897, 0x00FF30CF, 0x00FF18E7, 0x00FF7A85,
+  0x00FF10EF, 0x00FF38C7, 0x00FF5AA5, 0x00FF42BD,
+  0x00FF4AB5, 0x00FF52AD
+};
+
+const uint32_t KODE_RELAY_1 = 0x4321A15E; // colokan
+const uint32_t KODE_RELAY_2 = 0x4321B24D; // colokan panjang
+const uint32_t KODE_RELAY_3 = 0x4321C33C; // saklar lampu
+const uint32_t KODE_RELAY_4 = 0x4321D42B; // power MP3
+
+// =====================================================
+// LED FADE
+// =====================================================
+int kecerahanLED = 0;
+int arahFade = 5;
+unsigned long waktuFadeTerakhir = 0;
+const int jedaFade = 15;
+
+// =====================================================
+// WIFI / WEB STATE
+// =====================================================
+unsigned long waktuKonekWiFi = 0;
+bool sudahLewatJedaAwal = false;
+bool wifiDalamModeRecovery = false;
+unsigned long wifiRecoveryMulai = 0;
+const unsigned long WIFI_RECOVERY_TIMEOUT = 30000;
+unsigned long waktuWebServerTerakhir = 0;
+const unsigned long JEDA_WEB_SERVER = 10;
+
+WebServer server(80);
+String statusSistem = "Siap";
+
+unsigned long wifiReconnectTerakhir = 0;
+const unsigned long WIFI_RECONNECT_INTERVAL = 10000UL;
+
+// =====================================================
+// NTP STATE
+// =====================================================
+const time_t NTP_MIN_VALID = 1700000000;
+const unsigned long NTP_RESYNC_INTERVAL = 6UL * 60UL * 60UL * 1000UL;
+unsigned long ntpKonfigurasiTerakhir = 0;
+bool ntpSudahDikonfigurasi = false;
+
+// =====================================================
+// BUZZER STATE (non-blocking)
+// =====================================================
+bool buzzerAktif = false;
+bool buzzerSedangNyala = false;
+int buzzerSisaBip = 0;
+int buzzerDurasi = 0;
+int buzzerJeda = 0;
+unsigned long buzzerTimer = 0;
+
+// =====================================================
+// SERIAL2 BUFFER
+// =====================================================
+char serial2Buffer[512];
+size_t serial2Pos = 0;
+
+// RIWAYAT PERCAKAPAN ROBOT
+static const uint8_t HISTORY_MAX_ENTRIES = 24;
+struct HistoryEntry { uint32_t timestamp; char role; char text[420]; };
+HistoryEntry historyEntries[HISTORY_MAX_ENTRIES];
+Preferences historyPrefs;
+uint8_t historyCount = 0, historyNext = 0;
+bool historyPrefsReady = false;
+void historyLoad() {
+  historyPrefsReady = historyPrefs.begin("robotHist", false);
+  if (!historyPrefsReady) return;
+  historyCount = (uint8_t)min((uint32_t)HISTORY_MAX_ENTRIES, historyPrefs.getUInt("count", 0));
+  historyNext = (uint8_t)(historyPrefs.getUInt("next", 0) % HISTORY_MAX_ENTRIES);
+  for (uint8_t i = 0; i < HISTORY_MAX_ENTRIES; ++i) {
+    char key[5]; snprintf(key, sizeof(key), "h%02u", i);
+    if (historyPrefs.getBytesLength(key) == sizeof(HistoryEntry)) historyPrefs.getBytes(key, &historyEntries[i], sizeof(HistoryEntry));
+    else memset(&historyEntries[i], 0, sizeof(HistoryEntry));
+  }
+}
+void historyAppend(char role, const char* message) {
+  if (!historyPrefsReady || !message || !message[0]) return;
+  HistoryEntry entry = {};
+  entry.timestamp = (uint32_t)time(nullptr); entry.role = role;
+  strlcpy(entry.text, message, sizeof(entry.text));
+  historyEntries[historyNext] = entry;
+  char key[5]; snprintf(key, sizeof(key), "h%02u", historyNext);
+  historyPrefs.putBytes(key, &entry, sizeof(entry));
+  historyNext = (uint8_t)((historyNext + 1) % HISTORY_MAX_ENTRIES);
+  if (historyCount < HISTORY_MAX_ENTRIES) ++historyCount;
+  historyPrefs.putUInt("next", historyNext); historyPrefs.putUInt("count", historyCount);
+}
+String historyEscapeHtml(const char* value) {
+  String out; if (!value) return out;
+  for (const char* p = value; *p; ++p) {
+    if (*p == '&') out += "&amp;";
+    else if (*p == '<') out += "&lt;";
+    else if (*p == '>') out += "&gt;";
+    else if (*p == '"') out += "&quot;";
+    else if ((unsigned char)*p == 39) out += "&#39;";
+    else out += *p;
+  }
+  return out;
+}
+String historyFormatTime(uint32_t stamp) {
+  if (stamp < 1700000000UL) return String("Waktu belum tersedia");
+  time_t raw = (time_t)stamp; struct tm info; localtime_r(&raw, &info);
+  char buf[24]; strftime(buf, sizeof(buf), "%d/%m/%Y %H:%M", &info); return String(buf);
+}
+
+// =====================================================
+// UTILITY
+// =====================================================
+void sendIRSignal(uint32_t code) {
+  irsend.sendNEC(code, 32);
+}
+
+void bunyikanBuzzer(int jumlahBip, int durasiBip, int jedaBip) {
+  if (jumlahBip <= 0 || durasiBip <= 0) return;
+  if (buzzerAktif) return;
+
+  buzzerAktif = true;
+  buzzerSedangNyala = true;
+  buzzerSisaBip = jumlahBip;
+  buzzerDurasi = durasiBip;
+  buzzerJeda = jedaBip;
+  buzzerTimer = millis();
+  digitalWrite(PIN_BUZZER, HIGH);
+}
+
+void prosesBuzzer() {
+  if (!buzzerAktif) return;
+
+  unsigned long now = millis();
+
+  if (buzzerSedangNyala) {
+    if (now - buzzerTimer >= (unsigned long)buzzerDurasi) {
+      digitalWrite(PIN_BUZZER, LOW);
+      buzzerSedangNyala = false;
+      buzzerSisaBip--;
+      buzzerTimer = now;
+      if (buzzerSisaBip <= 0) buzzerAktif = false;
+    }
+    return;
+  }
+
+  if (buzzerSisaBip > 0) {
+    if (now - buzzerTimer >= (unsigned long)buzzerJeda) {
+      digitalWrite(PIN_BUZZER, HIGH);
+      buzzerSedangNyala = true;
+      buzzerTimer = now;
+    }
+  }
+}
+
+String ambilWaktu() {
+  time_t now = time(nullptr);
+  if (now < 50000) return "--:--:-- (Sinkronisasi...)";
+
+  struct tm t;
+  localtime_r(&now, &t);
+  char buffer[32];
+  snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d", t.tm_hour, t.tm_min, t.tm_sec);
+  return String(buffer);
+}
+
+time_t awalHariDari(time_t ts) {
+  struct tm t;
+  localtime_r(&ts, &t);
+  t.tm_hour = 0; t.tm_min = 0; t.tm_sec = 0;
+  t.tm_isdst = -1;
+  return mktime(&t);
+}
+
+int cekKualitasWiFi() {
+  if (WiFi.status() != WL_CONNECTED) return -1;
+  int rssi = WiFi.RSSI();
+  if (rssi > -50) return 3;
+  if (rssi > -60) return 2;
+  if (rssi > -70) return 1;
+  if (rssi > -80) return 0;
+  return -1;
+}
+
+// =====================================================
+// === KONTROL RELAY & KIPAS (dari CODE 2) ===
+// =====================================================
+void setRelay(int nomor, bool nyalakan) {
+  switch (nomor) {
+    case 1:
+    if (statusRelay1 != nyalakan) {
+      statusRelay1 = nyalakan;
+      statusRelay1Diketahui = true;
+      sendIRSignal(KODE_RELAY_1);
+    }
+    break;
+    case 2:
+    if (statusRelay2 != nyalakan) {
+      statusRelay2 = nyalakan;
+      statusRelay2Diketahui = true;
+      sendIRSignal(KODE_RELAY_2);
+    }
+    break;
+    case 3:
+    if (statusRelay3 != nyalakan) {
+      statusRelay3 = nyalakan;
+      statusRelay3Diketahui = true;
+      sendIRSignal(KODE_RELAY_3);
+    }
+    break;
+    case 4:
+    if (statusRelay4 != nyalakan) {
+      statusRelay4 = nyalakan;
+      sendIRSignal(KODE_RELAY_4);
+    }
+    break;
+  }
+}
+
+void setFan(bool nyalakan) {
+  if (statusKipas != nyalakan) {
+    statusKipas = nyalakan;
+    irsend.sendSymphony(0xD81, 12, 2);
+  }
+}
+
+// =====================================================
+// SENSOR
+// =====================================================
+void bacaSensorSuhu() {
+  int nilaiAnalogNTC = analogRead(PIN_NTC);
+
+  if (nilaiAnalogNTC > 0 && nilaiAnalogNTC < 4095) {
+    float resistansi = 10000.0 * ((4095.0 / (float)nilaiAnalogNTC) - 1.0);
+
+    if (resistansi > 0) {
+      float logResistansi = log(resistansi);
+      float tempK = 1.0 / (0.001129148 +
+      (0.000234125 * logResistansi) +
+      (0.0000000876741 * logResistansi * logResistansi * logResistansi));
+      float tempC = tempK - 273.15;
+      tempC += 4.0;
+      if (tempC > -10 && tempC < 60) dataSuhu = tempC;
+    }
+  }
+}
+
+// =====================================================
+// NTP + OLED AUTO (mengikuti NTP)
+// =====================================================
+void konfigurasiNTP() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  configTime(8 * 3600, 0, "pool.ntp.org", "time.google.com", "time.nist.gov");
+  ntpKonfigurasiTerakhir = millis();
+  ntpSudahDikonfigurasi = true;
+}
+
+bool waktuNTPValid(time_t now) {
+  return now >= NTP_MIN_VALID;
+}
+
+void prosesNTP() {
+  if (WiFi.status() != WL_CONNECTED) {
+    ntpSudahDikonfigurasi = false;
+    return;
+  }
+  if (!ntpSudahDikonfigurasi ||
+  millis() - ntpKonfigurasiTerakhir >= NTP_RESYNC_INTERVAL) {
+    konfigurasiNTP();
+  }
+}
+
+void prosesJadwalOLED(time_t sekarang) {
+  if (sekarang < 50000) return;
+
+  if (waktuOLEDTerakhir == 0) {
+    waktuOLEDTerakhir = sekarang;
+    return;
+  }
+  if (sekarang <= waktuOLEDTerakhir) {
+    waktuOLEDTerakhir = sekarang;
+    return;
+  }
+
+  time_t awalHari = awalHariDari(sekarang);
+  time_t targetMati   = awalHari + 60;
+  time_t targetBangun = awalHari + 4 * 3600L + 60;
+
+  if (targetMati > waktuOLEDTerakhir && targetMati <= sekarang) {
+    sendIRSignal(0x00FFE01F);
+    sudahKirimMatiOLED = true;
+    sudahKirimBangunOLED = false;
+    Serial.println("OLED: PERINTAH MATI TERKIRIM");
+  }
+
+  if (targetBangun > waktuOLEDTerakhir && targetBangun <= sekarang) {
+    sendIRSignal(0x00FFE41B);
+    sudahKirimBangunOLED = true;
+    sudahKirimMatiOLED = false;
+    Serial.println("OLED: PERINTAH BANGUN TERKIRIM");
+  }
+
+  waktuOLEDTerakhir = sekarang;
+}
+
+// =====================================================
+// SERIAL2
+// =====================================================
+void eksekusiTeksPerintah(String cmd);
+
+void prosesSerial2() {
+  while (Serial2.available()) {
+    char c = (char)Serial2.read();
+
+    if (c == '\r') continue;
+
+    if (c == '\n') {
+      serial2Buffer[serial2Pos] = '\0';
+      if (serial2Pos > 0) {
+        eksekusiTeksPerintah(String(serial2Buffer));
+      }
+      serial2Pos = 0;
+      continue;
+    }
+
+    if (serial2Pos < sizeof(serial2Buffer) - 1) {
+      serial2Buffer[serial2Pos++] = c;
+    } else {
+      serial2Pos = 0;
+      statusSistem = "Serial2: command terlalu panjang";
+    }
+  }
+}
+
+// =====================================================
+// COMMAND EXECUTION (dari CODE 2)
+// =====================================================
+void eksekusiTeksPerintah(String cmd) {
+  cmd.trim();
+  if (cmd.length() == 0) return;
+  if (cmd.startsWith("HISTU:")) { historyAppend('U', cmd.substring(6).c_str()); return; }
+  if (cmd.startsWith("HISTA:")) { historyAppend('A', cmd.substring(6).c_str()); return; }
+
+  bool dikenali = true;
+
+  // --- SENSOR (balas via Serial2) ---
+  if (cmd == "cek_suhu") {
+    bacaSensorSuhu();
+    Serial2.print("SUHU:");
+    Serial2.println(dataSuhu, 1);
+    statusSistem = "Sensor: Suhu (" + String(dataSuhu, 1) + " C)";
+    bunyikanBuzzer(1, 60, 0);
+    return;
+  }
+  if (cmd == "cek_cahaya") {
+    int nilaiMentahLDR = analogRead(PIN_LDR);
+    Serial2.print("CAHAYA:");
+    Serial2.println(nilaiMentahLDR);
+    statusSistem = "Sensor: Raw LDR (" + String(nilaiMentahLDR) + ")";
+    bunyikanBuzzer(1, 60, 0);
+    return;
+  }
+
+  // --- RELAY ON/OFF EKSPLISIT ---
+  if      (cmd == "r1_on")  setRelay(1, true);
+  else if (cmd == "r1_off") setRelay(1, false);
+  else if (cmd == "r2_on")  setRelay(2, true);
+  else if (cmd == "r2_off") setRelay(2, false);
+  else if (cmd == "r3_on")  setRelay(3, true);
+  else if (cmd == "r3_off") setRelay(3, false);
+  else if (cmd == "r4_on")  setRelay(4, true);
+  else if (cmd == "r4_off") setRelay(4, false);
+
+  // --- TOGGLE ---
+  else if (cmd == "r1") setRelay(1, !statusRelay1);
+  else if (cmd == "r2") setRelay(2, !statusRelay2);
+  else if (cmd == "r3") setRelay(3, !statusRelay3);
+  else if (cmd == "r4") setRelay(4, !statusRelay4);
+
+  // --- KIPAS ---
+  else if (cmd == "fan_on")    setFan(true);
+  else if (cmd == "fan_off")   setFan(false);
+  else if (cmd == "fan_pwr")   setFan(!statusKipas);
+  else if (cmd == "fan_speed") irsend.sendSymphony(0xD82, 12, 2);
+  else if (cmd == "fan_swing") irsend.sendSymphony(0xD90, 12, 2);
+  else if (cmd == "fan_mode")  irsend.sendSymphony(0xDA0, 12, 2);
+
+  // --- MOCHI ---
+  else if (cmd == "m_led")   sendIRSignal(0x00FF12ED);
+  else if (cmd == "m_mute")  sendIRSignal(0x00FF0AF5);
+  else if (cmd == "m_musik") sendIRSignal(0x00FF827D);
+  else if (cmd == "m_cek")   sendIRSignal(0x00FF708F);
+
+  // --- MP3 ---
+  else if (cmd == "mp3_mode") sendIRSignal(0x00FF22DD);
+  else if (cmd == "mp3_play") sendIRSignal(0x00FF906F);
+  else if (cmd == "mp3_eq")   sendIRSignal(0x00FFC23D);
+
+  // --- LAGU 0-9 ---
+  else if (cmd.length() == 1 && cmd.charAt(0) >= '0' && cmd.charAt(0) <= '9') {
+    int idx = cmd.toInt();
+    sendIRSignal(kodeLagu[idx]);
+  }
+  else {
+    dikenali = false;
+  }
+
+  if (!dikenali) {
+    Serial2.println("ERR");
+    statusSistem = "Perintah [" + cmd + "] Tidak Dikenal";
+    bunyikanBuzzer(1, 60, 0);
+    return;
+  }
+
+  statusSistem = "Perintah [" + cmd + "] Sukses";
+  bunyikanBuzzer(1, 100, 0);
+}
+
+// =====================================================
+// WEB INTERFACE
+// =====================================================
+String halamanWeb() {
+  String h = "<!DOCTYPE html><html><head>";
+  h += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  h += "<style>";
+  h += "body{font-family:sans-serif;text-align:center;background:#1e1e24;color:#f0f0f5;padding:10px;margin:0;}";
+  h += ".remote{max-width:320px;margin:20px auto;background:#0d0d11;padding:25px 20px;border-radius:45px;";
+  h += "box-shadow:inset 0 2px 4px rgba(255,255,255,.1),0 12px 35px rgba(0,0,0,.7);";
+  h += "border:4px solid #25252b;}";
+  h += "h3{margin:15px 0 5px;color:#8e92a3;font-size:12px;letter-spacing:1px;text-transform:uppercase;}";
+  h += ".lcd{font-size:11px;font-family:monospace;background:#232b28;color:#5af78e;padding:8px;";
+  h += "border-radius:6px;margin-bottom:20px;text-align:left;}";
+  h += ".line{border-top:2px dashed #22222b;margin:15px 0;}";
+  h += ".grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}";
+  h += ".grid-2{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;}";
+  h += ".btn-tv{display:block;padding:12px 0;font-size:12px;font-weight:bold;text-decoration:none;";
+  h += "border-radius:12px;background:linear-gradient(180deg,#32323a,#1f1f24);";
+  h += "border:1px solid #141417;color:#e1e1e6;}";
+  h += ".btn-relay{padding:14px 0;font-size:13px;border-radius:10px;color:#fff;";
+  h += "font-weight:bold;text-decoration:none;}";
+  h += ".btn-num{background:linear-gradient(180deg,#2b2b33,#1a1a20);border-radius:50%;";
+  h += "width:52px;height:52px;line-height:52px;padding:0;font-size:16px;margin:auto;}";
+  h += "</style>";
+  h += "<script>setInterval(function(){fetch('/update_data').then(r=>r.text()).then(d=>{";
+  h += "document.getElementById('lcd_panel').innerHTML=d;});},3000);</script>";
+  h += "</head><body><div class='remote'>";
+  h += "<h3>OTAK WEB PEMANCAR</h3>";
+  h += "<a href='/history' style='display:block;background:#2563eb;color:white;padding:12px;border-radius:10px;text-decoration:none;margin:10px 0 18px'>RIWAYAT PERCAKAPAN ROBOT</a>";
+
+  String txtLdr = (analogRead(PIN_LDR) > 100) ? "MENYALA" : "MATI";
+
+  h += "<div class='lcd' id='lcd_panel'>TIME : " + ambilWaktu();
+  h += "<br>SUHU : " + String(dataSuhu, 1) + " C<br>LAMPU: " + txtLdr;
+  h += "<br>STAT : " + statusSistem + "</div>";
+
+  h += "<h3>CONTROL RELAY FISIK ESP32</h3><div class='grid-2'>";
+
+  String r1Txt = statusRelay1Diketahui ? (statusRelay1 ? "ON" : "OFF") : "?";
+  String r2Txt = statusRelay2Diketahui ? (statusRelay2 ? "ON" : "OFF") : "?";
+  String r3Txt = statusRelay3Diketahui ? (statusRelay3 ? "ON" : "OFF") : "?";
+
+  h += "<a href='/relay?id=1' class='btn-relay' style='background:";
+  h += String(statusRelay1Diketahui ? (statusRelay1 ? "#10b981" : "#ef4444") : "#6b7280");
+  h += ";'>colokan: " + r1Txt + "</a>";
+
+  h += "<a href='/relay?id=2' class='btn-relay' style='background:";
+  h += String(statusRelay2Diketahui ? (statusRelay2 ? "#10b981" : "#ef4444") : "#6b7280");
+  h += ";'>colokan panjang: " + r2Txt + "</a>";
+
+  h += "<a href='/relay?id=3' class='btn-relay' style='background:";
+  h += String(statusRelay3Diketahui ? (statusRelay3 ? "#10b981" : "#ef4444") : "#6b7280");
+  h += ";'>saklar lampu: " + r3Txt + "</a>";
+
+  h += "<a href='/relay?id=4' class='btn-relay' style='background:";
+  h += String(statusRelay4 ? "#10b981" : "#ef4444");
+  h += ";'>mp3 player: " + String(statusRelay4 ? "ON" : "OFF") + "</a></div>";
+
+  h += "<div style='font-size:10px;color:#9ca3af;margin-top:8px;'>? = status relay belum diketahui setelah restart</div>";
+  h += "<div class='line'></div><h3>KONTROL JAM BONEKA MOCHI</h3><div class='grid-2'>";
+  h += "<a href='/mochi?cmd=led' class='btn-relay' style='background:#6366f1;'>FORCED LED</a>";
+  h += "<a href='/mochi?cmd=mute' class='btn-relay' style='background:#6366f1;'>MUTE BUZZER</a>";
+  h += "<a href='/mochi?cmd=musik' class='btn-relay' style='background:#ca8a04;'>PUTAR MUSIK</a>";
+  h += "<a href='/mochi?cmd=cek' class='btn-relay' style='background:#4d7c0f;'>TES HARDWARE</a>";
+  h += "</div><div class='line'></div>";
+
+  h += "<h3>AUDIO PLAYER</h3><div class='grid-3'>";
+  h += "<a href='/k?a=m&t=m' class='btn-tv'>MODE</a>";
+  h += "<a href='/k?a=m&t=l' class='btn-tv' style='background:#1d4ed8;'>PLAY</a>";
+  h += "<a href='/k?a=m&t=e' class='btn-tv'>EQ</a></div>";
+
+  h += "<div class='line'></div><h3>SMART FAN</h3><div class='grid-3'>";
+  h += "<a href='/k?a=k&t=p' class='btn-tv' style='color:#ff4d4d;'>PWR</a>";
+  h += "<a href='/k?a=k&t=s' class='btn-tv'>SPEED</a>";
+  h += "<a href='/k?a=k&t=w' class='btn-tv'>SWING</a></div>";
+  h += "<a href='/k?a=k&t=m' class='btn-tv' style='margin-top:10px;'>MODE KIPAS</a>";
+
+  h += "<div class='line'></div><h3>CH SELECT</h3><div class='grid-3'>";
+  for (int i = 1; i <= 9; i++) {
+    h += "<a href='/k?a=m&t=" + String(i) + "' class='btn-tv btn-num'>" + String(i) + "</a>";
+  }
+  h += "<div></div><a href='/k?a=m&t=0' class='btn-tv btn-num'>0</a></div>";
+
+  h += "</div></body></html>";
+  return h;
+}
+
+void handleHistory() {
+  uint8_t order[HISTORY_MAX_ENTRIES], starts[HISTORY_MAX_ENTRIES], ends[HISTORY_MAX_ENTRIES];
+  uint8_t count = 0;
+  uint8_t first = (uint8_t)((historyNext + HISTORY_MAX_ENTRIES - historyCount) % HISTORY_MAX_ENTRIES);
+  for (uint8_t n = 0; n < historyCount; ++n) order[n] = (uint8_t)((first + n) % HISTORY_MAX_ENTRIES);
+  for (uint8_t n = 0; n < historyCount; ++n) {
+    bool newSession = (n == 0);
+    if (n > 0) {
+      uint32_t prev = historyEntries[order[n - 1]].timestamp;
+      uint32_t now = historyEntries[order[n]].timestamp;
+      newSession = (now > prev && now - prev > 300);
+    }
+    if (newSession) { starts[count] = n; if (count > 0) ends[count - 1] = n - 1; ++count; }
+  }
+  if (count > 0) ends[count - 1] = historyCount - 1;
+
+  String h = "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>";
+  h += "<style>body{margin:0;padding:16px;background:#111318;color:#e7e9ef;font:16px Arial,sans-serif}.wrap{max-width:760px;margin:auto}.item{background:#20232b;border:1px solid #343844;border-radius:12px;padding:14px;margin:10px 0;text-align:left;white-space:pre-wrap;overflow-wrap:anywhere}.u{border-left:4px solid #60a5fa}.a{border-left:4px solid #34d399}.meta{font-size:12px;color:#9ca3af;margin-bottom:8px}.back,.open{display:block;color:#fff;background:#343844;padding:12px;border-radius:9px;text-decoration:none;margin:10px 0}.open{background:#20232b;border:1px solid #343844}.small{font-size:13px;color:#9ca3af;margin-top:6px}</style></head><body><div class='wrap'>";
+  if (server.hasArg("session")) {
+    uint32_t wanted = (uint32_t)server.arg("session").toInt();
+    int selected = -1;
+    for (uint8_t g = 0; g < count; ++g) {
+      uint32_t stamp = historyEntries[order[starts[g]]].timestamp;
+      if (stamp == wanted) { selected = g; break; }
+    }
+    h += "<a class='back' href='/history'>← Semua riwayat</a><h2>Detail Percakapan</h2>";
+    if (selected < 0) h += "<div class='item'>Sesi tidak ditemukan atau sudah tergeser oleh riwayat terbaru.</div>";
+    else {
+      for (uint8_t n = starts[selected]; n <= ends[selected]; ++n) {
+        const HistoryEntry &e = historyEntries[order[n]];
+        h += String("<div class='item ") + (e.role == 'U' ? "u" : "a") + "'><div class='meta'>" + (e.role == 'U' ? "PENGGUNA" : "GEMINI") + " · " + historyFormatTime(e.timestamp) + "</div>" + historyEscapeHtml(e.text) + "</div>";
+      }
+    }
+  } else {
+    h += "<a class='back' href='/'>← Kembali ke kontrol</a><h2>Riwayat Percakapan Robot</h2>";
+    h += "<p>" + String(count) + " sesi terdeteksi · " + String(historyCount) + " pesan tersimpan.</p>";
+    if (count == 0) h += "<div class='item'>Belum ada riwayat. Ucapkan sesuatu kepada robot setelah koneksi UART aktif.</div>";
+    for (int g = (int)count - 1; g >= 0; --g) {
+      const HistoryEntry &firstEntry = historyEntries[order[starts[g]]];
+      const HistoryEntry *titleEntry = &firstEntry;
+      for (uint8_t n = starts[g]; n <= ends[g]; ++n) {
+        if (historyEntries[order[n]].role == 'U') { titleEntry = &historyEntries[order[n]]; break; }
+      }
+      uint32_t sessionId = firstEntry.timestamp;
+      h += String("<a class='open' href='/history?session=") + String(sessionId) + "'><strong>" + historyEscapeHtml(titleEntry->text) + "</strong><div class='small'>" + historyFormatTime(sessionId) + " · " + String(ends[g] - starts[g] + 1) + " pesan</div></a>";
+    }
+  }
+  h += "</div></body></html>"; server.send(200, "text/html; charset=utf-8", h);
+}
+
+void handleUpdateData() {
+  String txtLdr = (analogRead(PIN_LDR) > 100) ? "MENYALA" : "MATI";
+  String response = "TIME : " + ambilWaktu();
+  response += "<br>SUHU : " + String(dataSuhu, 1) + " C";
+  response += "<br>LAMPU: " + txtLdr;
+  response += "<br>STAT : " + statusSistem;
+  server.send(200, "text/plain", response);
+}
+
+void handleKirim() {
+  bunyikanBuzzer(3, 60, 60);
+  String a = server.arg("a");
+  String t = server.arg("t");
+
+  if (a == "k") {
+    if (t == "p")      setFan(!statusKipas);
+    else if (t == "s") irsend.sendSymphony(0xD82, 12, 2);
+    else if (t == "w") irsend.sendSymphony(0xD90, 12, 2);
+    else if (t == "m") irsend.sendSymphony(0xDA0, 12, 2);
+    statusSistem = "IR: Kipas Sent";
+  } else if (a == "m") {
+    if (t == "m")      irsend.sendNEC(0x00FF22DD, 32);
+    else if (t == "l") irsend.sendNEC(0x00FF906F, 32);
+    else if (t == "e") irsend.sendNEC(0x00FFC23D, 32);
+    else {
+      int idx = t.toInt();
+      if (idx >= 0 && idx <= 9) irsend.sendNEC(kodeLagu[idx], 32);
+    }
+    statusSistem = "IR: MP3 Sent (" + t + ")";
+  }
+
+  server.sendHeader("Location", "/");
+  server.send(302, "text/plain", "");
+}
+
+void handleRelayWeb() {
+  bunyikanBuzzer(3, 60, 60);
+  String id = server.arg("id");
+
+  if (id == "1") {
+    setRelay(1, !statusRelay1);
+    statusSistem = "IR TX: colokan Diubah";
+  } else if (id == "2") {
+    setRelay(2, !statusRelay2);
+    statusSistem = "IR TX: colokan panjang Diubah";
+  } else if (id == "3") {
+    setRelay(3, !statusRelay3);
+    statusSistem = "IR TX: saklar lampu Diubah";
+  } else if (id == "4") {
+    setRelay(4, !statusRelay4);
+    statusSistem = "IR TX: mp3 player Diubah";
+  }
+
+  server.sendHeader("Location", "/");
+  server.send(302, "text/plain", "");
+}
+
+void handleMochiWeb() {
+  bunyikanBuzzer(3, 60, 60);
+  String cmd = server.arg("cmd");
+
+  if (cmd == "led")        { sendIRSignal(0x00FF12ED); statusSistem = "IR TX: Strobo Mochi"; }
+  else if (cmd == "mute")  { sendIRSignal(0x00FF0AF5); statusSistem = "IR TX: Mute Mochi"; }
+  else if (cmd == "musik") { sendIRSignal(0x00FF827D); statusSistem = "IR TX: Musik Mochi"; }
+  else if (cmd == "cek")   { sendIRSignal(0x00FF708F); statusSistem = "IR TX: Cek HW Mochi"; }
+
+  server.sendHeader("Location", "/");
+  server.send(302, "text/plain", "");
+}
+
+// =====================================================
+// WIFI HANDLING
+// =====================================================
+void handleWiFiDenganPrioritas() {
+  unsigned long nowMillis = millis();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    if (!wifiDalamModeRecovery) {
+      wifiDalamModeRecovery = true;
+      wifiRecoveryMulai = nowMillis;
+      Serial.println("WIFI: Masuk mode recovery");
+    }
+
+    if (nowMillis - wifiReconnectTerakhir >= WIFI_RECONNECT_INTERVAL) {
+      wifiReconnectTerakhir = nowMillis;
+      WiFi.reconnect();
+
+      if (WiFi.status() != WL_CONNECTED &&
+      nowMillis - wifiRecoveryMulai > 10000) {
+        Serial.println("WIFI: Restart stack WiFi...");
+        WiFi.disconnect(true);
+        delay(100);
+        WiFi.begin(ssid, password);
+        wifiRecoveryMulai = nowMillis;
+      }
+    }
+
+    if (nowMillis - wifiRecoveryMulai > WIFI_RECOVERY_TIMEOUT) {
+      wifiDalamModeRecovery = false;
+      wifiRecoveryMulai = 0;
+      Serial.println("WIFI: Recovery timeout");
+    }
+    return;
+  } else {
+    if (wifiDalamModeRecovery) {
+      wifiDalamModeRecovery = false;
+      wifiRecoveryMulai = 0;
+      Serial.println("WIFI: Koneksi pulih");
+      waktuKonekWiFi = nowMillis;
+    }
+  }
+
+  if (cekKualitasWiFi() >= 2) {
+    prosesNTP();
+  }
+}
+
+void handleWebServerDenganTimeout() {
+  unsigned long nowMillis = millis();
+  if (nowMillis - waktuWebServerTerakhir >= JEDA_WEB_SERVER) {
+    waktuWebServerTerakhir = nowMillis;
+    server.handleClient();
+  }
+}
+
+// =====================================================
+// SETUP
+// =====================================================
+void setup() {
+  Serial.begin(115200);
+  Serial2.begin(115200, SERIAL_8N1, 16, 17);  // RX2=16, TX2=17
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(false);
+  WiFi.setSleep(false);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+
+  irsend.begin();
+
+  pinMode(PIN_LED_FISIK, OUTPUT);
+  digitalWrite(PIN_LED_FISIK, LOW);
+  pinMode(PIN_BUZZER, OUTPUT);
+  digitalWrite(PIN_BUZZER, LOW);
+  pinMode(PIN_LDR, INPUT);
+  pinMode(PIN_NTC, INPUT);
+
+  WiFi.begin(ssid, password);
+
+  unsigned long startMulaiWiFi = millis();
+  bool gagalKonek = false;
+
+  while (WiFi.status() != WL_CONNECTED) {
+    digitalWrite(PIN_LED_FISIK, !digitalRead(PIN_LED_FISIK));
+    delay(100);
+
+    if (millis() - startMulaiWiFi > 3000) server.handleClient();
+    if (millis() - startMulaiWiFi > 12000) { gagalKonek = true; break; }
+  }
+
+  if (gagalKonek) {
+    Serial.println("WIFI GAGAL TERHUBUNG");
+    bunyikanBuzzer(8, 70, 70);
+    Serial.println("Web server tetap aktif di mode offline");
+  } else {
+    Serial.println("WIFI TERHUBUNG");
+    Serial.print("IP ESP32: ");
+    Serial.println(WiFi.localIP());
+    digitalWrite(PIN_LED_FISIK, HIGH);
+    waktuKonekWiFi = millis();
+    bunyikanBuzzer(3, 80, 80);
+  }
+
+  konfigurasiNTP();
+  historyLoad();
+
+  server.on("/history", handleHistory);
+  server.on("/", []() { server.send(200, "text/html", halamanWeb()); });
+  server.on("/update_data", handleUpdateData);
+  server.on("/k", handleKirim);
+  server.on("/relay", handleRelayWeb);
+  server.on("/mochi", handleMochiWeb);
+  server.on("/ping", []() { server.send(200, "text/plain", "OK"); });
+  server.begin();
+
+  Serial.println();
+  Serial.println("Sistem Pemancar Manual LDR-NTC Siap!");
+  Serial.println("Web server aktif, sensor sentuh dihapus");
+  Serial.println("Serial2: r1_on, r1_off, rX, fan_on, fan_off, cek_suhu, cek_cahaya");
+}
+
+// =====================================================
+// MAIN LOOP
+// =====================================================
+void loop() {
+  handleWebServerDenganTimeout();
+  prosesSerial2();
+  handleWiFiDenganPrioritas();
+
+  time_t now = time(nullptr);
+
+  static unsigned long timerLokalWeb = 0;
+  if (millis() - timerLokalWeb >= 3000) {
+    timerLokalWeb = millis();
+    bacaSensorSuhu();
+  }
+
+  // LED fade
+  if (WiFi.status() == WL_CONNECTED && cekKualitasWiFi() >= 1) {
+    if (!sudahLewatJedaAwal) {
+      if (millis() - waktuKonekWiFi >= 4000) {
+        analogWrite(PIN_LED_FISIK, 0);
+        kecerahanLED = 0;
+        arahFade = 5;
+        sudahLewatJedaAwal = true;
+      }
+    } else if (millis() - waktuFadeTerakhir >= jedaFade) {
+      waktuFadeTerakhir = millis();
+      kecerahanLED += arahFade;
+      if (kecerahanLED <= 0 || kecerahanLED >= 255) arahFade = -arahFade;
+      analogWrite(PIN_LED_FISIK, constrain(kecerahanLED, 0, 255));
+    }
+  } else {
+    digitalWrite(PIN_LED_FISIK, LOW);
+  }
+
+  // OLED mengikuti NTP
+  if (waktuNTPValid(now)) {
+    prosesJadwalOLED(now);
+  }
+
+  prosesBuzzer();
+  yield();
+}
