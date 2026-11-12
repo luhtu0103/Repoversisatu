@@ -37,6 +37,7 @@ char enrolled_name[32] = {};
 volatile int request_state = 0;
 char request_name[32] = {};
 volatile esp_err_t request_result = ESP_ERR_INVALID_STATE;
+volatile float verification_distance = 0.0f;
 
 float current_features[kMaxFrames][kCoeffs];
 float power_spectrum[kBins];
@@ -245,7 +246,7 @@ extern "C" esp_err_t speaker_id_request_enrollment(const char *name) {
     // A previous caller may have timed out while capture was already in progress.
     // If that capture later completed, discard its unclaimed completion before
     // accepting a new request so the enrollment API cannot remain stuck in state 3.
-    if (request_state == 3) request_state = 0;
+    if (request_state == 3 || request_state == 6) request_state = 0;
     if (request_state != 0) return ESP_ERR_INVALID_STATE;
     strlcpy(request_name, name, sizeof(request_name));
     request_result = ESP_ERR_INVALID_STATE;
@@ -285,6 +286,40 @@ extern "C" esp_err_t speaker_id_compare_pcm16(
     ESP_LOGI(TAG, "MFCC/DTW selesai: input_frames=%d template_frames=%d distance=%.5f (ambang belum dikalibrasi)",
              count, reference_count, (double)*out_distance);
     return ESP_OK;
+}
+
+extern "C" esp_err_t speaker_id_request_verification(float *out_distance) {
+    if (!out_distance) return ESP_ERR_INVALID_ARG;
+    if (reference_count == 0) return ESP_ERR_INVALID_STATE;
+    if (request_state == 3 || request_state == 6) request_state = 0;
+    if (request_state != 0) return ESP_ERR_INVALID_STATE;
+    request_result = ESP_ERR_INVALID_STATE;
+    verification_distance = 0.0f;
+    request_state = 4;
+    TickType_t start = xTaskGetTickCount(), timeout = pdMS_TO_TICKS(30000);
+    while ((xTaskGetTickCount() - start) < timeout) {
+        if (request_state == 6) {
+            esp_err_t result = request_result;
+            *out_distance = verification_distance;
+            request_state = 0;
+            return result;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (request_state == 4) request_state = 0;
+    return ESP_ERR_TIMEOUT;
+}
+
+extern "C" int speaker_id_take_verification_request(void) {
+    if (request_state != 4) return 0;
+    request_state = 5;
+    return 1;
+}
+
+extern "C" void speaker_id_complete_verification(esp_err_t result, float distance) {
+    request_result = result;
+    verification_distance = distance;
+    request_state = 6;
 }
 
 extern "C" int speaker_id_has_template(void) {
