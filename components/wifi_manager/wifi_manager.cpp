@@ -6,6 +6,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
 
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -27,6 +28,7 @@ static EventGroupHandle_t s_wifi_event_group = NULL;
 
 static volatile bool s_wifi_started = false;
 static volatile bool s_wifi_got_ip = false;
+static bool s_dns_diagnostic_started = false;
 
 static size_t dns_skip_name(const uint8_t *packet, size_t len, size_t offset)
 {
@@ -180,6 +182,13 @@ static void direct_dns_diagnostic(void)
     ESP_LOGI(TAG, "========================================");
 }
 
+static void dns_diagnostic_task(void *arg)
+{
+    (void)arg;
+    direct_dns_diagnostic();
+    vTaskDelete(NULL);
+}
+
 static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     (void)arg;
@@ -238,7 +247,16 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
             // to 8.8.4.4 broke the system resolver used by getaddrinfo().
         }
 
-        direct_dns_diagnostic();
+        // DNS diagnostics use sizable stack buffers and blocking sockets. Do not run
+        // them inside the ESP event loop task (sys_evt); use a dedicated task instead.
+        if (!s_dns_diagnostic_started) {
+            s_dns_diagnostic_started = true;
+            BaseType_t task_ok = xTaskCreate(dns_diagnostic_task, "dns_diag", 6144, NULL, 3, NULL);
+            if (task_ok != pdPASS) {
+                s_dns_diagnostic_started = false;
+                ESP_LOGE(TAG, "Gagal membuat task diagnostik DNS");
+            }
+        }
         return;
     }
 
