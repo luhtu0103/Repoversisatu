@@ -24,7 +24,9 @@ static bool supported_tool_name(const char *name)
         strcmp(name, "control_device") == 0 ||
         strcmp(name, "memory_save") == 0 ||
         strcmp(name, "memory_delete") == 0 ||
-        strcmp(name, "memory_read") == 0);
+        strcmp(name, "memory_read") == 0 ||
+        strcmp(name, "speaker_enroll") == 0 ||
+        strcmp(name, "speaker_identify") == 0);
 }
 
 static bool send_tool_payload(const char *id, const char *name, const char *result)
