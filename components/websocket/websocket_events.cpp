@@ -82,9 +82,10 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
 
         case WEBSOCKET_EVENT_ERROR:
             ESP_LOGE(TAG, "WebSocket Error!");
-            ESP_LOGE(TAG, "HEAP at WS error: internal_free=%u internal_largest=%u psram_free=%u psram_largest=%u",
+            ESP_LOGE(TAG, "HEAP at WS error: internal_free=%u internal_largest=%u internal_min_free=%u psram_free=%u psram_largest=%u",
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
             now_ms = (uint32_t)(esp_timer_get_time() / 1000);
