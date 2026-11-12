@@ -123,6 +123,7 @@ jobs:
           test -s artifact/firmware.elf
           test -s artifact/srmodels.bin
           test -s artifact/merged-binary.bin
+          test "$(stat -c %s artifact/merged-binary.bin)" -gt "$(stat -c %s artifact/firmware.bin)"
           # Keep firmware.bin as the raw flashable binary. upload-artifact packages all files itself.
           
 
