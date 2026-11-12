@@ -123,7 +123,7 @@ jobs:
           test -s artifact/firmware.elf
           test -s artifact/srmodels.bin
           test -s artifact/merged-binary.bin
-          zip -j artifact/firmware.bin artifact/bootloader.bin artifact/partitions.bin artifact/firmware.elf artifact/srmodels.bin artifact/merged-binary.bin
+          # Keep firmware.bin as the raw flashable binary. upload-artifact packages all files itself.
           
 
       - name: Upload firmware artifacts
