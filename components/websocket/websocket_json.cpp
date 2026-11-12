@@ -766,6 +766,8 @@ void process_gemini_message(const char *json, size_t len)
             /* Do not carry memory authorization into a later user turn. */
             pending_explicit_memory_save = false;
             pending_explicit_memory_delete = false;
+            /* Speaker enrollment authorization is scoped to this user turn too. */
+            pending_explicit_speaker_enroll = false;
             if (standby_after_turn_complete) {
                 standby_after_turn_complete = false;
                 ESP_LOGI(TAG, "STANDBY: balasan Gemini selesai dibuat; menunggu audio selesai diputar");
