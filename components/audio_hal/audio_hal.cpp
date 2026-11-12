@@ -1,4 +1,5 @@
 #include "audio_hal.h"
+#include "speaker_id.h"
 #include "esp_log.h"
 #include "esp_err.h"
 #include "afe_audio.h"
@@ -227,6 +228,7 @@ static void log_audio_heap(const char *stage)
 }
 void audio_hal_init(void)
 {
+    speaker_id_init();
     ESP_LOGI(TAG, "Menginisialisasi Audio I2S - proven v6.1.5 / Xiaozhi-compatible...");
     i2s_chan_config_t tx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     tx_chan_cfg.dma_desc_num = 6; tx_chan_cfg.dma_frame_num = 240; tx_chan_cfg.auto_clear = true;
@@ -309,6 +311,7 @@ size_t audio_read_mic(uint8_t *dest, size_t max_len)
         const size_t out_samples = afe_audio_process_frame(
             pcm_frame, samples, afe_output, out_capacity);
         if (out_samples > 0) {
+            speaker_id_process_pcm(afe_output, out_samples);
             memcpy(dest, afe_output, out_samples * sizeof(int16_t));
             return out_samples * sizeof(int16_t);
         }
@@ -328,6 +331,7 @@ size_t audio_read_mic(uint8_t *dest, size_t max_len)
         if (value < INT16_MIN) value = INT16_MIN;
         pcm[i] = (int16_t)value;
     }
+    speaker_id_process_pcm(pcm, output_samples);
     return output_samples * sizeof(int16_t);
 }
 size_t audio_write_speaker(const uint8_t *src, size_t len)
