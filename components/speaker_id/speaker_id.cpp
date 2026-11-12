@@ -272,11 +272,18 @@ extern "C" esp_err_t speaker_id_compare_pcm16(
     if (reference_count == 0) return ESP_ERR_INVALID_STATE;
 
     int count = 0;
+    ESP_LOGI(TAG, "Verifikasi dimulai: samples=%u template_frames=%d",
+             (unsigned)samples, reference_count);
     esp_err_t err = extract_features(pcm, samples, current_features, &count);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Verifikasi gagal ekstraksi MFCC: %s", esp_err_to_name(err));
+        return err;
+    }
 
     *out_distance = dtw_distance(reference_features, reference_count,
                                  current_features, count);
+    ESP_LOGI(TAG, "MFCC/DTW selesai: input_frames=%d template_frames=%d distance=%.5f (ambang belum dikalibrasi)",
+             count, reference_count, (double)*out_distance);
     return ESP_OK;
 }
 
