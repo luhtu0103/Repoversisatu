@@ -2,7 +2,6 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
@@ -24,9 +23,11 @@ static profile_t profiles[PROFILE_N];
 static size_t profile_count = 0;
 static int16_t frame_buf[FRAME_N];
 static size_t frame_fill = 0;
-static int16_t sample_tail[FRAME_N];
-static size_t tail_count = 0;
 static int16_t ring_feat[SEQ_N][MFCC_N];
+static profile_t profile_staging;
+static int16_t current_work[SEQ_N][MFCC_N];
+static int16_t down_work[80][MFCC_N];
+static int16_t ref_work[80][MFCC_N];
 static size_t ring_write = 0, ring_count = 0;
 static size_t silence_samples = 0;
 static bool was_speech = false;
@@ -72,7 +73,7 @@ extern "C" bool speaker_id_enroll_last(const char *name,char *result,size_t resu
     if(result&&result_len)result[0]=0;if(!name||!name[0]||strlen(name)>=SPEAKER_ID_NAME_MAX){if(result&&result_len)snprintf(result,result_len,"Nama profil tidak valid (maksimum %d karakter).",SPEAKER_ID_NAME_MAX-1);return false;}
     if(!initialized)speaker_id_init();if(ring_count<45){if(result&&result_len)snprintf(result,result_len,"Rekaman terlalu singkat; ucapkan nama dan kalimat selama sekitar 2 detik, lalu daftar ulang.");return false;}
     int idx=-1;for(size_t i=0;i<profile_count;i++)if(strcmp(profiles[i].name,name)==0){idx=(int)i;break;}if(idx<0){if(profile_count>=PROFILE_N){if(result&&result_len)snprintf(result,result_len,"Penyimpanan penuh; maksimum %d profil suara.",PROFILE_N);return false;}idx=(int)profile_count;}
-    profile_t p={};p.magic=PROFILE_MAGIC;strlcpy(p.name,name,sizeof(p.name));size_t n=0;copy_recent(p.feat,&n);p.count=(uint16_t)n;
+    profile_t &p=profile_staging;memset(&p,0,sizeof(p));p.magic=PROFILE_MAGIC;strlcpy(p.name,name,sizeof(p.name));size_t n=0;copy_recent(p.feat,&n);p.count=(uint16_t)n;
     nvs_handle_t h;if(nvs_open("speaker_id",NVS_READWRITE,&h)!=ESP_OK){if(result&&result_len)snprintf(result,result_len,"NVS tidak bisa dibuka.");return false;}
     char key[8];snprintf(key,sizeof(key),"p%d",idx);esp_err_t e=nvs_set_blob(h,key,&p,sizeof(p));if(e==ESP_OK)e=nvs_commit(h);nvs_close(h);
     if(e!=ESP_OK){if(result&&result_len)snprintf(result,result_len,"Gagal menyimpan profil ke flash NVS (kode %d).",(int)e);return false;}
@@ -86,11 +87,11 @@ static float dtw_distance(const int16_t a[SEQ_N][MFCC_N],size_t na,const int16_t
 }
 extern "C" bool speaker_id_identify(char *name,size_t name_len,float *distance_out) {
     if(name&&name_len)name[0]=0;if(distance_out)*distance_out=0;if(!initialized)speaker_id_init();
-    if(ring_count<45||profile_count==0)return false;int16_t current[SEQ_N][MFCC_N];size_t n=0;copy_recent(current,&n);float best=1e30f;int winner=-1;
+    if(ring_count<45||profile_count==0)return false;size_t n=0;copy_recent(current_work,&n);float best=1e30f;int winner=-1;
     /* Compare every second frame to bound DTW cost on the ESP32-S3. */
-    int16_t down[80][MFCC_N];size_t dn=0;for(size_t i=0;i<n;i+=2){memcpy(down[dn++],current[i],sizeof(down[0]));}
-    for(size_t p=0;p<profile_count;p++){int16_t ref[80][MFCC_N];size_t rn=0;for(size_t i=0;i<profiles[p].count;i+=2){if(rn<80)memcpy(ref[rn++],profiles[p].feat[i],sizeof(ref[0]));}
-        if(rn<10||dn<10)continue;float d=dtw_distance((const int16_t (*)[MFCC_N])down,dn,(const int16_t (*)[MFCC_N])ref,rn);if(d<best){best=d;winner=(int)p;}}
+    size_t dn=0;for(size_t i=0;i<n;i+=2){memcpy(down_work[dn++],current_work[i],sizeof(down_work[0]));}
+    for(size_t p=0;p<profile_count;p++){size_t rn=0;for(size_t i=0;i<profiles[p].count;i+=2){if(rn<80)memcpy(ref_work[rn++],profiles[p].feat[i],sizeof(ref_work[0]));}
+        if(rn<10||dn<10)continue;float d=dtw_distance((const int16_t (*)[MFCC_N])down_work,dn,(const int16_t (*)[MFCC_N])ref_work,rn);if(d<best){best=d;winner=(int)p;}}
     if(distance_out)*distance_out=best;
     /* Conservative initial threshold; must be calibrated using real recordings. */
     if(winner<0||best>1800.0f)return false;if(name&&name_len)strlcpy(name,profiles[winner].name,name_len);return true;
