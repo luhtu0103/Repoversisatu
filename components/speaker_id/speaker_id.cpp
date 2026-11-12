@@ -19,7 +19,7 @@ constexpr int kHop = 160;         // 10 ms
 constexpr int kBins = kFrame / 2 + 1;
 constexpr int kMelFilters = 26;
 constexpr int kCoeffs = 13;
-constexpr int kMaxFrames = 120;
+constexpr int kMaxFrames = 240; // up to 2.4 s at 16 kHz with 10 ms hop
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kMinRmsPcm = 120.0f;
 
