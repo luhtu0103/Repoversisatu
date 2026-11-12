@@ -1,0 +1,136 @@
+name: Repo5-compatible ESP32-S3 firmware
+
+on:
+  push:
+    branches: [copy-repo5]
+  pull_request:
+    branches: [copy-repo5]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ESP-IDF 6.0.1 / ESP32-S3
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v6.0.1
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install build utilities
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git zip
+          python --version
+          idf.py --version
+
+      - name: Validate Repo5 build inputs
+        run: |
+          python -m py_compile scripts/pack_model.py scripts/merge_firmware.py
+          test -f sdkconfig.defaults
+          test -f partitions/partitions.csv
+          grep -q '^CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y' sdkconfig.defaults
+          grep -q '^CONFIG_PARTITION_TABLE_CUSTOM=y' sdkconfig.defaults
+          grep -q '^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/partitions.csv"' sdkconfig.defaults
+          grep -q '^CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y' sdkconfig.defaults
+          grep -q '^model,.*0x410000,0x400000' partitions/partitions.csv
+
+      - name: Configure ESP-IDF target
+        run: idf.py set-target esp32s3
+
+      - name: Build firmware
+        run: idf.py build
+
+      - name: Verify effective configuration and outputs
+        run: |
+          grep -q '^CONFIG_IDF_TARGET="esp32s3"' sdkconfig
+          grep -q '^CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y' sdkconfig
+          grep -q '^CONFIG_PARTITION_TABLE_CUSTOM=y' sdkconfig
+          grep -q '^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/partitions.csv"' sdkconfig
+          grep -q '^CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y' sdkconfig
+          test -s build/Repoversiempat.bin
+          test -s build/Repoversiempat.elf
+          test -s build/bootloader/bootloader.bin
+          test -s build/partition_table/partition-table.bin
+
+      - name: Fetch pinned ESP-SR models
+        run: |
+          PROJECT_DIR="$GITHUB_WORKSPACE"
+          rm -rf /tmp/esp-sr
+          mkdir -p /tmp/esp-sr
+          cd /tmp/esp-sr
+          git init
+          git remote add origin https://github.com/espressif/esp-sr.git
+          git config core.sparseCheckout true
+          git sparse-checkout set model/wakenet_model/wn9_hiesp model/nsnet_model/nsnet2
+          git fetch --depth 1 origin 5fadfbd5bd9df756f543973bd43520d9270ffb1b
+          git checkout --detach FETCH_HEAD
+          cd "$PROJECT_DIR"
+          MODEL_SRC=/tmp/esp-sr/model/wakenet_model/wn9_hiesp
+          NS_MODEL_SRC=/tmp/esp-sr/model/nsnet_model/nsnet2
+          test -s "$MODEL_SRC/wn9_index"
+          test -s "$MODEL_SRC/wn9_data"
+          test -d "$NS_MODEL_SRC"
+          test -n "$(find "$NS_MODEL_SRC" -type f -print -quit)"
+          mkdir -p build/srmodels
+          rm -f build/srmodels/srmodels.bin
+          rm -rf build/srmodels/wn9_hiesp build/srmodels/nsnet2
+          cp -a "$MODEL_SRC" build/srmodels/wn9_hiesp
+          cp -a "$NS_MODEL_SRC" build/srmodels/nsnet2
+
+      - name: Package ESP-SR models
+        run: |
+          MODEL=build/srmodels/srmodels.bin
+          python -u scripts/pack_model.py -m build/srmodels -o srmodels.bin
+          test -s "$MODEL"
+          test -s build/srmodels/wn9_hiesp/wn9_index
+          test -s build/srmodels/wn9_hiesp/wn9_data
+          test -n "$(find build/srmodels/nsnet2 -type f -print -quit)"
+          MODEL_SIZE=$(stat -c %s "$MODEL")
+          test "$MODEL_SIZE" -le $((0x400000))
+          grep -a -q 'wn9_hiesp' "$MODEL"
+          grep -a -q 'nsnet2' "$MODEL"
+
+      - name: Merge flash image
+        run: |
+          python scripts/merge_firmware.py --build build --partitions partitions/partitions.csv --model build/srmodels/srmodels.bin --output build/merged-binary.bin
+          test -s build/merged-binary.bin
+
+      - name: Prepare release artifacts
+        run: |
+          rm -rf artifact
+          mkdir -p artifact
+          cp build/Repoversiempat.bin artifact/firmware.bin
+          cp build/bootloader/bootloader.bin artifact/bootloader.bin
+          cp build/partition_table/partition-table.bin artifact/partitions.bin
+          cp build/Repoversiempat.elf artifact/firmware.elf
+          cp build/srmodels/srmodels.bin artifact/srmodels.bin
+          cp build/merged-binary.bin artifact/merged-binary.bin
+          test -s artifact/firmware.bin
+          test -s artifact/bootloader.bin
+          test -s artifact/partitions.bin
+          test -s artifact/firmware.elf
+          test -s artifact/srmodels.bin
+          test -s artifact/merged-binary.bin
+          zip -j Repo5-ESP32S3-Firmware.zip artifact/firmware.bin artifact/bootloader.bin artifact/partitions.bin artifact/firmware.elf artifact/srmodels.bin artifact/merged-binary.bin
+          test -s Repo5-ESP32S3-Firmware.zip
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Repo5-ESP32S3-Firmware
+          path: |
+            artifact/firmware.bin
+            artifact/bootloader.bin
+            artifact/partitions.bin
+            artifact/firmware.elf
+            artifact/srmodels.bin
+            artifact/merged-binary.bin
+            Repo5-ESP32S3-Firmware.zip
+          if-no-files-found: error
+          retention-days: 14
