@@ -123,8 +123,8 @@ jobs:
           test -s artifact/firmware.elf
           test -s artifact/srmodels.bin
           test -s artifact/merged-binary.bin
-          zip -j Repo5-ESP32S3-Firmware.zip artifact/firmware.bin artifact/bootloader.bin artifact/partitions.bin artifact/firmware.elf artifact/srmodels.bin artifact/merged-binary.bin
-          test -s Repo5-ESP32S3-Firmware.zip
+          zip -j artifact/firmware.bin artifact/bootloader.bin artifact/partitions.bin artifact/firmware.elf artifact/srmodels.bin artifact/merged-binary.bin
+          
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
@@ -137,6 +137,6 @@ jobs:
             artifact/firmware.elf
             artifact/srmodels.bin
             artifact/merged-binary.bin
-            Repo5-ESP32S3-Firmware.zip
+            
           if-no-files-found: error
           retention-days: 14
