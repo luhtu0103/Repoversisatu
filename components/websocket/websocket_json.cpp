@@ -366,6 +366,7 @@ static char latest_user_transcript[768];
 static bool pending_explicit_memory_save = false;
 static bool pending_explicit_memory_delete = false;
 static bool pending_explicit_speaker_enroll = false;
+static bool pending_explicit_speaker_verify = false;
 /* Keep memory-read workspace off the WebSocket RX task stack. */
 static char memory_read_context[4096];
 
