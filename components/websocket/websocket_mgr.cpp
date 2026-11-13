@@ -14,6 +14,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -46,6 +47,8 @@ TaskHandle_t websocket_tx_task_handle = NULL;
 QueueHandle_t websocket_rx_queue = NULL;
 TaskHandle_t websocket_rx_task_handle = NULL;
 static TaskHandle_t websocket_cleanup_task_handle = NULL;
+/* Serialize TX writes with stop/destroy during WebSocket cleanup. */
+static SemaphoreHandle_t websocket_client_api_mutex = NULL;
 static volatile bool websocket_start_pending = false;
 static volatile bool websocket_standby_request = false;
 static volatile bool websocket_fresh_session_reset_pending = false;
@@ -76,6 +79,16 @@ void websocket_tx_flush_queue(void)
     if (flushed) ESP_LOGW(TAG, "TX queue dibersihkan: %u command", (unsigned)flushed);
 }
 
+static int websocket_send_text_locked(esp_websocket_client_handle_t ws, const char *data, int len, TickType_t timeout)
+{
+    if (!websocket_client_api_mutex || xSemaphoreTake(websocket_client_api_mutex, portMAX_DELAY) != pdTRUE) return -1;
+    int sent = -1;
+    if (ws != NULL && client == ws && is_connected && !websocket_tx_error && esp_websocket_client_is_connected(ws))
+        sent = esp_websocket_client_send_text(ws, data, len, timeout);
+    xSemaphoreGive(websocket_client_api_mutex);
+    return sent;
+}
+
 static void websocket_cleanup_task(void *arg)
 {
     (void)arg;
@@ -97,7 +110,12 @@ static void websocket_cleanup_task(void *arg)
                 /* A disconnected socket is not proof that the WebSocket task
                  * has exited. Stop it outside the event callback, then wait
                  * for WEBSOCKET_EVENT_FINISH before destroying the client. */
-                esp_err_t stop_err = esp_websocket_client_stop(close_target);
+                esp_err_t stop_err = ESP_FAIL;
+                if (websocket_client_api_mutex && xSemaphoreTake(websocket_client_api_mutex, portMAX_DELAY) == pdTRUE) {
+                    if (client == close_target) stop_err = esp_websocket_client_stop(close_target);
+                    else stop_err = ESP_ERR_INVALID_STATE;
+                    xSemaphoreGive(websocket_client_api_mutex);
+                }
                 if (stop_err == ESP_OK) {
                     websocket_close_requested = false;
                     ESP_LOGI(TAG, "Cleanup worker: stop diminta pada client terputus; menunggu FINISH");
@@ -110,9 +128,14 @@ static void websocket_cleanup_task(void *arg)
             esp_websocket_client_handle_t ws = client;
             if (ws != NULL && !esp_websocket_client_is_connected(ws)) {
                 ESP_LOGI(TAG, "Cleanup worker: destroy client dari task manager");
-                esp_err_t err = esp_websocket_client_destroy(ws);
+                esp_err_t err = ESP_FAIL;
+                if (websocket_client_api_mutex && xSemaphoreTake(websocket_client_api_mutex, portMAX_DELAY) == pdTRUE) {
+                    if (client == ws) err = esp_websocket_client_destroy(ws);
+                    else err = ESP_ERR_INVALID_STATE;
+                    if (err == ESP_OK) client = NULL;
+                    xSemaphoreGive(websocket_client_api_mutex);
+                }
                 if (err == ESP_OK) {
-                    client = NULL;
                     ESP_LOGI(TAG, "Cleanup worker: client berhasil dihancurkan");
                     if (websocket_fresh_session_reset_pending) {
                         websocket_fresh_session_reset_pending = false;
@@ -171,7 +194,7 @@ static void websocket_tx_task(void *arg)
                 free(setup_json); free(audio_data); continue;
             }
             int64_t send_start_us = esp_timer_get_time();
-            int sent = esp_websocket_client_send_text(ws, setup_json, (int)setup_len, pdMS_TO_TICKS(5000));
+            int sent = websocket_send_text_locked(ws, setup_json, (int)setup_len, pdMS_TO_TICKS(5000));
             if (sent == (int)setup_len) websocket_last_tx_ms = (uint32_t)(esp_timer_get_time() / 1000);
             else __atomic_add_fetch(&websocket_tx_fail_count, 1U, __ATOMIC_RELAXED);
             int64_t send_elapsed_ms = (esp_timer_get_time() - send_start_us) / 1000;
@@ -196,7 +219,7 @@ static void websocket_tx_task(void *arg)
                 free(audio_data);
                 continue;
             }
-            int sent = esp_websocket_client_send_text(ws, (const char *)audio_data, (int)cmd.len, pdMS_TO_TICKS(1000));
+            int sent = websocket_send_text_locked(ws, (const char *)audio_data, (int)cmd.len, pdMS_TO_TICKS(1000));
             if (sent == (int)cmd.len) websocket_last_tx_ms = (uint32_t)(esp_timer_get_time() / 1000);
             else __atomic_add_fetch(&websocket_tx_fail_count, 1U, __ATOMIC_RELAXED);
             if (sent != (int)cmd.len)
@@ -267,7 +290,7 @@ static void websocket_tx_task(void *arg)
                         if (cmd.generation != websocket_connection_generation || !is_connected || websocket_tx_error || client != ws || !esp_websocket_client_is_connected(ws)) break;
                     }
                     int64_t send_start_us = esp_timer_get_time();
-                    int sent = esp_websocket_client_send_text(ws, json_buf, json_len, AUDIO_SEND_TIMEOUT);
+                    int sent = websocket_send_text_locked(ws, json_buf, json_len, AUDIO_SEND_TIMEOUT);
                     if (sent == json_len) websocket_last_tx_ms = (uint32_t)(esp_timer_get_time() / 1000);
                     else __atomic_add_fetch(&websocket_tx_fail_count, 1U, __ATOMIC_RELAXED);
                     int64_t send_elapsed_ms = (esp_timer_get_time() - send_start_us) / 1000;
@@ -305,6 +328,10 @@ static void websocket_tx_task(void *arg)
 
 bool websocket_tx_init(void)
 {
+    if (!websocket_client_api_mutex) {
+        websocket_client_api_mutex = xSemaphoreCreateMutex();
+        if (!websocket_client_api_mutex) return false;
+    }
     if (!websocket_tx_queue) {
         websocket_tx_queue = xQueueCreate(WS_TX_QUEUE_LENGTH, sizeof(ws_tx_command_t));
         if (!websocket_tx_queue) return false;
@@ -392,15 +419,25 @@ void websocket_app_start(void)
     ESP_LOGI(TAG, "WS keepalive: TCP idle=30s interval=10s count=3; audio write timeout=3000ms retry=1");
     log_ws_heap("before_websocket_client_init");
 
-    client = esp_websocket_client_init(&cfg);
+    if (websocket_client_api_mutex && xSemaphoreTake(websocket_client_api_mutex, portMAX_DELAY) == pdTRUE) {
+        client = esp_websocket_client_init(&cfg);
+        xSemaphoreGive(websocket_client_api_mutex);
+    } else client = NULL;
     if (!client) {
         log_ws_heap("websocket_client_init_FAILED");
         return;
     }
     log_ws_heap("after_websocket_client_init");
-    esp_err_t err = esp_websocket_register_events(client, WEBSOCKET_EVENT_ANY, websocket_event_handler, (void *)client);
+    esp_err_t err;
+    if (websocket_client_api_mutex && xSemaphoreTake(websocket_client_api_mutex, portMAX_DELAY) == pdTRUE) {
+        err = esp_websocket_register_events(client, WEBSOCKET_EVENT_ANY, websocket_event_handler, (void *)client);
+        xSemaphoreGive(websocket_client_api_mutex);
+    } else err = ESP_FAIL;
     if (err != ESP_OK) { esp_websocket_client_destroy(client); client = NULL; return; }
-    err = esp_websocket_client_start(client);
+    if (websocket_client_api_mutex && xSemaphoreTake(websocket_client_api_mutex, portMAX_DELAY) == pdTRUE) {
+        err = esp_websocket_client_start(client);
+        xSemaphoreGive(websocket_client_api_mutex);
+    } else err = ESP_FAIL;
     if (err != ESP_OK) { esp_websocket_client_destroy(client); client = NULL; return; }
     ws_started = true;
 }
