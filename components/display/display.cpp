@@ -98,90 +98,111 @@ static int draw_rssi(void)
 
 void oled_init(void)
 {
-    // OLED2 uses its own I2C controller. Initialize it independently so an
-    // OLED1/I2C0 failure does not prevent the scrolling transcript display.
+    // Claim initialization atomically so concurrent tasks cannot create the
+    // I2C/panel resources twice or initialize OLED2 repeatedly.
+    static portMUX_TYPE init_mux = portMUX_INITIALIZER_UNLOCKED;
+    static bool initializing = false;
+
+    portENTER_CRITICAL(&init_mux);
+    if (oled_ready || initializing) {
+        portEXIT_CRITICAL(&init_mux);
+        return;
+    }
+    initializing = true;
+    portEXIT_CRITICAL(&init_mux);
+
     oled2_face_init();
-    if (oled_ready) return;
 
-    i2c_master_bus_config_t bus_config = {
-        .i2c_port = I2C_NUM_0,
-        .sda_io_num = OLED_SDA_PIN,
-        .scl_io_num = OLED_SCL_PIN,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .intr_priority = 0,
-        .trans_queue_depth = 0,
-        .flags = {.enable_internal_pullup = 1, .allow_pd = 0},
-    };
+    bool success = false;
+    do {
+        esp_err_t err = ESP_OK;
+        i2c_master_bus_config_t bus_config = {
+            .i2c_port = I2C_NUM_0,
+            .sda_io_num = OLED_SDA_PIN,
+            .scl_io_num = OLED_SCL_PIN,
+            .clk_source = I2C_CLK_SRC_DEFAULT,
+            .glitch_ignore_cnt = 7,
+            .intr_priority = 0,
+            .trans_queue_depth = 0,
+            .flags = {.enable_internal_pullup = 1, .allow_pd = 0},
+        };
 
-    // oled_init() can be reached repeatedly while initialization is incomplete.
-    // Reuse any resources already acquired instead of creating I2C_NUM_0 again.
-    esp_err_t err = ESP_OK;
-    if (i2c_bus == NULL) {
-        err = i2c_new_master_bus(&bus_config, &i2c_bus);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Gagal membuat I2C OLED (SDA=%d SCL=%d): %s",
-                     OLED_SDA_PIN, OLED_SCL_PIN, esp_err_to_name(err));
-            return;
+        if (i2c_bus == NULL) {
+            err = i2c_new_master_bus(&bus_config, &i2c_bus);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Gagal membuat I2C OLED (SDA=%d SCL=%d): %s",
+                         OLED_SDA_PIN, OLED_SCL_PIN, esp_err_to_name(err));
+                break;
+            }
         }
-    }
 
-    esp_lcd_panel_io_i2c_config_t io_config = {
-        .dev_addr = OLED_I2C_ADDR,
-        .scl_speed_hz = 400 * 1000,
-        .control_phase_bytes = 1,
-        .dc_bit_offset = 6,
-        .lcd_cmd_bits = 8,
-        .lcd_param_bits = 8,
-        .on_color_trans_done = NULL,
-        .user_ctx = NULL,
-        .flags = {.dc_low_on_data = 0, .disable_control_phase = 0},
-    };
+        esp_lcd_panel_io_i2c_config_t io_config = {
+            .dev_addr = OLED_I2C_ADDR,
+            .scl_speed_hz = 400 * 1000,
+            .control_phase_bytes = 1,
+            .dc_bit_offset = 6,
+            .lcd_cmd_bits = 8,
+            .lcd_param_bits = 8,
+            .on_color_trans_done = NULL,
+            .user_ctx = NULL,
+            .flags = {.dc_low_on_data = 0, .disable_control_phase = 0},
+        };
 
-    if (panel_io == NULL) {
-        err = esp_lcd_new_panel_io_i2c(i2c_bus, &io_config, &panel_io);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Gagal membuat panel I2C: %s", esp_err_to_name(err));
-            return;
+        if (panel_io == NULL) {
+            err = esp_lcd_new_panel_io_i2c(i2c_bus, &io_config, &panel_io);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Gagal membuat panel I2C: %s", esp_err_to_name(err));
+                break;
+            }
         }
-    }
 
-    esp_lcd_panel_dev_config_t panel_config = {};
-    panel_config.reset_gpio_num = GPIO_NUM_NC;
-    panel_config.bits_per_pixel = 1;
-    esp_lcd_panel_ssd1306_config_t ssd1306_config = {.height = OLED_HEIGHT};
-    panel_config.vendor_config = &ssd1306_config;
+        esp_lcd_panel_dev_config_t panel_config = {};
+        panel_config.reset_gpio_num = GPIO_NUM_NC;
+        panel_config.bits_per_pixel = 1;
+        esp_lcd_panel_ssd1306_config_t ssd1306_config = {.height = OLED_HEIGHT};
+        panel_config.vendor_config = &ssd1306_config;
 
-    if (panel == NULL) {
-        ESP_LOGI(TAG, "Install SSD1306 driver");
-        err = esp_lcd_new_panel_ssd1306(panel_io, &panel_config, &panel);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Gagal install SSD1306: %s", esp_err_to_name(err));
-            return;
+        if (panel == NULL) {
+            ESP_LOGI(TAG, "Install SSD1306 driver");
+            err = esp_lcd_new_panel_ssd1306(panel_io, &panel_config, &panel);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Gagal install SSD1306: %s", esp_err_to_name(err));
+                break;
+            }
         }
-    }
 
-    if ((err = esp_lcd_panel_reset(panel)) != ESP_OK) {
-        ESP_LOGE(TAG, "OLED reset gagal: %s", esp_err_to_name(err));
-        return;
-    }
-    if ((err = esp_lcd_panel_init(panel)) != ESP_OK) {
-        ESP_LOGE(TAG, "OLED init gagal: %s", esp_err_to_name(err));
-        return;
-    }
+        err = esp_lcd_panel_reset(panel);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "OLED reset gagal: %s", esp_err_to_name(err));
+            break;
+        }
+        err = esp_lcd_panel_init(panel);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "OLED init gagal: %s", esp_err_to_name(err));
+            break;
+        }
 
-    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel, false));
-    ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel, true, true));
-    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
+        ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel, false));
+        ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel, true, true));
+        ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
 
-    oled_mutex = xSemaphoreCreateMutex();
-    if (!oled_mutex) {
-        ESP_LOGE(TAG, "Gagal membuat mutex OLED");
-        return;
-    }
+        oled_mutex = xSemaphoreCreateMutex();
+        if (!oled_mutex) {
+            ESP_LOGE(TAG, "Gagal membuat mutex OLED");
+            break;
+        }
 
-    oled_ready = true;
-    memset(face_buffer, 0, sizeof(face_buffer));
+        memset(face_buffer, 0, sizeof(face_buffer));
+        success = true;
+    } while (false);
+
+    portENTER_CRITICAL(&init_mux);
+    oled_ready = success;
+    initializing = false;
+    portEXIT_CRITICAL(&init_mux);
+
+    if (!success) return;
+
     display_render_buffer(face_buffer);
     ESP_LOGI(TAG, "XiaoZhi SSD1306 128x64 siap: SDA=%d SCL=%d ADDR=0x%02X SPEED=400kHz MIRROR=XY",
              OLED_SDA_PIN, OLED_SCL_PIN, OLED_I2C_ADDR);
