@@ -113,9 +113,20 @@ bool uart_control_execute_sensor_command(const char *command, char *response, si
 
             const char *value = response + prefix_len;
             bool numeric = (*value != '\0');
+            bool has_digit = false;
+            bool has_dot = false;
             for (const char *p = value; numeric && *p; ++p) {
-                if (*p < '0' || *p > '9') numeric = false;
+                if (*p >= '0' && *p <= '9') {
+                    has_digit = true;
+                } else if (*p == '.' && !has_dot) {
+                    has_dot = true;
+                } else if (*p == '-' && p == value && strcmp(command, "cek_suhu") == 0) {
+                    // Suhu dapat bernilai negatif; tanda minus hanya boleh di awal.
+                } else {
+                    numeric = false;
+                }
             }
+            numeric = numeric && has_digit;
             if (!numeric) {
                 ESP_LOGW(TAG, "Nilai sensor tidak numerik: %s", response);
                 idx = 0;
