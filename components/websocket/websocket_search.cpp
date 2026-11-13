@@ -82,7 +82,7 @@ static bool url_encode(const char *in, char *out, size_t cap)
     return true;
 }
 
-static void parse_ddg_results(const char *html, char *out, size_t cap)
+static unsigned parse_ddg_results(const char *html, char *out, size_t cap)
 {
     out[0] = '\0';
     const char *p = html;
@@ -118,12 +118,13 @@ static void parse_ddg_results(const char *html, char *out, size_t cap)
         }
         size_t used = strlen(out);
         if (used + 4 < cap) {
-            snprintf(out + used, cap - used, "%u. %s\n%s\n%s\n", count + 1, title, url, snippet);
+            snprintf(out + used, cap - used, "HASIL %u\nJudul: %s\nURL sumber: %s\nCuplikan: %s\n\n", count + 1, title[0] ? title : "(judul tidak tersedia)", url[0] ? url : "(URL tidak tersedia)", snippet[0] ? snippet : "(cuplikan tidak tersedia)");
             count++;
         }
         p = end + 4;
     }
     if (!count) snprintf(out, cap, "Pencarian tidak menghasilkan cuplikan yang bisa dibaca. Situs pencarian mungkin mengubah format atau membatasi permintaan.");
+    return count;
 }
 
 static void web_search_task(void *arg)
@@ -159,8 +160,8 @@ static void web_search_task(void *arg)
             esp_err_t err = esp_http_client_perform(client_http);
             int status = esp_http_client_get_status_code(client_http);
             if (err == ESP_OK && status == 200 && body->used > 0) {
-                parse_ddg_results(body->data, result, sizeof(result));
-                ESP_LOGI(TAG, "Pencarian selesai: HTTP %d, %u byte", status, (unsigned)body->used);
+                unsigned parsed = parse_ddg_results(body->data, result, sizeof(result));
+                ESP_LOGI(TAG, "Pencarian selesai: HTTP %d, %u byte, hasil_terparse=%u, result_len=%u", status, (unsigned)body->used, parsed, (unsigned)strlen(result));
             } else {
                 snprintf(result, sizeof(result), "Pencarian web gagal (HTTP %d, err=%s). Coba lagi nanti.", status, esp_err_to_name(err));
                 ESP_LOGW(TAG, "Pencarian gagal: HTTP=%d err=%s", status, esp_err_to_name(err));
