@@ -25,7 +25,7 @@ jobs:
       - name: Install build utilities
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git zip
+          apt-get install -y --no-install-recommends git
           python --version
           . /opt/esp/idf/export.sh
           idf.py --version
@@ -123,8 +123,8 @@ jobs:
           test -s artifact/firmware.elf
           test -s artifact/srmodels.bin
           test -s artifact/merged-binary.bin
-          zip -j artifact/firmware-package.zip artifact/firmware.bin artifact/bootloader.bin artifact/partitions.bin artifact/firmware.elf artifact/srmodels.bin artifact/merged-binary.bin
-          
+          test "$(stat -c %s artifact/merged-binary.bin)" -gt "$(stat -c %s artifact/firmware.bin)"
+          # Keep firmware.bin as the raw flashable binary. upload-artifact packages all files itself.
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
@@ -137,7 +137,5 @@ jobs:
             artifact/firmware.elf
             artifact/srmodels.bin
             artifact/merged-binary.bin
-            artifact/firmware-package.zip
-            
           if-no-files-found: error
           retention-days: 14
