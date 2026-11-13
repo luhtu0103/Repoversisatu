@@ -2,6 +2,7 @@
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdlib.h>
@@ -128,6 +129,12 @@ static void parse_ddg_results(const char *html, char *out, size_t cap)
 static void web_search_task(void *arg)
 {
     search_job_t *job = (search_job_t *)arg;
+    /* Let audio/network activity settle before starting a second TLS handshake. */
+    vTaskDelay(pdMS_TO_TICKS(300));
+    ESP_LOGI(TAG, "TLS mulai: free_heap=%u min_free_heap=%u stack_hwm=%u",
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)esp_get_minimum_free_heap_size(),
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
     char encoded[SEARCH_QUERY_MAX * 3 + 1] = {0};
     char result[SEARCH_RESULT_MAX] = {0};
     search_http_buffer_t *body = (search_http_buffer_t *)calloc(1, sizeof(search_http_buffer_t));
@@ -138,7 +145,9 @@ static void web_search_task(void *arg)
         esp_http_client_config_t cfg = {};
         cfg.url = url;
         cfg.method = HTTP_METHOD_GET;
-        cfg.timeout_ms = 9000;
+        cfg.timeout_ms = 15000;
+        /* Keep this independent HTTP request conservative while Gemini audio is active. */
+        cfg.keep_alive_enable = false;
         cfg.event_handler = search_http_event;
         cfg.user_data = body;
         cfg.crt_bundle_attach = esp_crt_bundle_attach;
@@ -177,7 +186,7 @@ bool websocket_search_start(const char *id, const char *query)
     snprintf(job->id, sizeof(job->id), "%s", id);
     memcpy(job->query, query, qlen);
     job->query[qlen] = '\0';
-    BaseType_t created = xTaskCreate(web_search_task, "web_search", 6144, job, 3, NULL);
+    BaseType_t created = xTaskCreate(web_search_task, "web_search", 8192, job, 2, NULL);
     if (created != pdPASS) {
         free(job);
         ESP_LOGW(TAG, "Tidak bisa membuat task pencarian");
