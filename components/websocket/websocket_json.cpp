@@ -208,6 +208,35 @@ static void add_memory_tools(cJSON *setup)
     }
 }
 
+static void add_web_search_tool(cJSON *setup)
+{
+    if (!setup) return;
+    cJSON *tools = cJSON_GetObjectItem(setup, "tools");
+    if (!cJSON_IsArray(tools)) return;
+    cJSON *tool = NULL, *decls = NULL;
+    cJSON_ArrayForEach(tool, tools) {
+        decls = cJSON_GetObjectItem(tool, "functionDeclarations");
+        if (cJSON_IsArray(decls)) break;
+        decls = NULL;
+    }
+    if (!decls) return;
+    cJSON *decl = cJSON_CreateObject();
+    if (!decl) return;
+    cJSON_AddStringToObject(decl, "name", "web_search");
+    cJSON_AddStringToObject(decl, "behavior", "NON_BLOCKING");
+    cJSON_AddStringToObject(decl, "description",
+        "Cari informasi terkini di web saat pengguna bertanya tentang berita, fakta yang perlu diverifikasi, atau informasi yang mungkin berubah. Gunakan pencarian ini sebelum menjawab pertanyaan web. Layanan pencarian terpisah ini gratis dan hasilnya dapat terbatas. Jangan mengklaim sudah mencari jika tool gagal. Query harus ringkas dan spesifik.");
+    cJSON *params = cJSON_AddObjectToObject(decl, "parameters");
+    cJSON_AddStringToObject(params, "type", "OBJECT");
+    cJSON *props = cJSON_AddObjectToObject(params, "properties");
+    cJSON *query = cJSON_AddObjectToObject(props, "query");
+    cJSON_AddStringToObject(query, "type", "STRING");
+    cJSON_AddStringToObject(query, "description", "Kata kunci pencarian web yang ringkas dan spesifik.");
+    cJSON *required = cJSON_AddArrayToObject(params, "required");
+    cJSON_AddItemToArray(required, cJSON_CreateString("query"));
+    cJSON_AddItemToArray(decls, decl);
+}
+
 bool build_gemini_setup(char **output, size_t *output_len)
 {
     if (!output || !output_len) return false;
@@ -279,6 +308,7 @@ bool build_gemini_setup(char **output, size_t *output_len)
     }
     add_device_control_tool(setup);
     add_memory_tools(setup);
+    add_web_search_tool(setup);
 
     cJSON *realtime = cJSON_AddObjectToObject(setup, "realtimeInputConfig");
     cJSON *aad = cJSON_AddObjectToObject(realtime, "automaticActivityDetection");
@@ -516,6 +546,16 @@ static void process_gemini_tool_call(cJSON *tool_call)
             size_t memory_len = ai_memory_get_context(memory_read_context, sizeof(memory_read_context));
             (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
                 memory_len ? memory_read_context : "Belum ada catatan jangka panjang yang tersimpan.");
+            continue;
+        } else if (strcmp(name->valuestring, "web_search") == 0) {
+            cJSON *query = cJSON_GetObjectItem(args, "query");
+            if (!cJSON_IsString(query) || !query->valuestring || !query->valuestring[0]) {
+                (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
+                    "Pencarian gagal: query kosong.");
+            } else if (!websocket_search_start(id->valuestring, query->valuestring)) {
+                (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
+                    "Pencarian web belum bisa dimulai karena memori atau task tidak tersedia. Coba lagi.");
+            }
             continue;
         } else if (strcmp(name->valuestring, "control_device") == 0) {
             cJSON *command = cJSON_GetObjectItem(args, "command");
