@@ -223,7 +223,8 @@ static void add_web_search_tool(cJSON *setup)
     cJSON *decl = cJSON_CreateObject();
     if (!decl) return;
     cJSON_AddStringToObject(decl, "name", "web_search");
-    cJSON_AddStringToObject(decl, "behavior", "NON_BLOCKING");
+    /* Search must finish before Gemini continues with an answer based on unverified facts. */
+    cJSON_AddStringToObject(decl, "behavior", "BLOCKING");
     cJSON_AddStringToObject(decl, "description",
         "Cari informasi terkini di web saat pengguna bertanya tentang berita, fakta yang perlu diverifikasi, atau informasi yang mungkin berubah. Gunakan pencarian ini sebelum menjawab pertanyaan web. Layanan pencarian terpisah ini gratis dan hasilnya dapat terbatas. Jangan mengklaim sudah mencari jika tool gagal. Query harus ringkas dan spesifik.");
     cJSON *params = cJSON_AddObjectToObject(decl, "parameters");
