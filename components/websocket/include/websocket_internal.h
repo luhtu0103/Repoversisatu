@@ -9,7 +9,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #define SESSION_HANDLE_MAX_LEN 1024
-#define WS_RX_MAX_PAYLOAD_SIZE (48 * 1024)
+/* Gemini Live audio JSON can exceed 48 KiB; streamed parsing compacts audio before queueing. */
+#define WS_RX_MAX_PAYLOAD_SIZE (128 * 1024)
 #define WS_RX_SLOT_SIZE (40 * 1024)
 /* v7.0.31: increase persistent RX slot headroom after v7.0.30 showed
  * buffer_drop=4 and queue_hwm=4 during Gemini audio bursts. */
