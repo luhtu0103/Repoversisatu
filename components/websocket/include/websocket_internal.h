@@ -43,7 +43,7 @@ extern esp_websocket_client_handle_t client; extern volatile bool is_connected; 
 extern volatile uint32_t websocket_last_rx_ms;
 extern volatile uint32_t websocket_last_tx_ms;
 extern volatile uint32_t websocket_tx_fail_count;
-extern StreamBufferHandle_t audio_stream; extern TaskHandle_t audio_playback_task_handle; extern volatile bool audio_turn_active; extern volatile bool audio_turn_complete_pending; extern volatile uint32_t websocket_connection_generation;
+extern StreamBufferHandle_t audio_stream; extern TaskHandle_t audio_playback_task_handle; extern volatile bool audio_turn_active; extern volatile bool audio_turn_complete_pending; extern volatile uint32_t websocket_connection_generation; extern volatile bool websocket_mic_uplink_paused;
 void websocket_schedule_setup(uint32_t generation);
 extern uint32_t audio_chunks_received; extern uint64_t audio_bytes_received; extern uint64_t audio_bytes_queued; extern uint32_t audio_write_calls; extern uint64_t audio_bytes_played; extern uint64_t audio_bytes_dropped; extern uint64_t audio_bytes_playback_dropped;
 void websocket_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data); void reset_rx_buffer(void); bool ensure_rx_buffer(size_t required_size); void process_websocket_payload(esp_websocket_event_data_t *data); void process_gemini_message(const char *json, size_t len); bool build_gemini_setup(char **output, size_t *output_len); void clear_session_handle(void); bool store_session_handle(const char *handle); size_t get_audio_pending_bytes(void); bool start_audio_playback(void); void clear_audio_buffer(void); void request_audio_buffer_clear(void); void reset_audio_turn_stats(void); void begin_audio_turn(void); bool queue_audio_pcm(const uint8_t *pcm, size_t len); void check_audio_playback_complete(void);
@@ -61,4 +61,4 @@ bool websocket_search_start(const char *id, const char *query);
 
 bool websocket_take_standby_request(void);
 void websocket_request_standby(void);
-bool websocket_take_audio_playback_complete(void);
+bool websocket_take_audio_playback_complete(void); void websocket_set_mic_uplink_paused(bool paused);
