@@ -11,7 +11,7 @@
 #include <ctype.h>
 
 static const char *TAG = "WS_SEARCH";
-#define SEARCH_HTTP_MAX 10000
+#define SEARCH_HTTP_MAX 16000
 #define SEARCH_QUERY_MAX 240
 #define SEARCH_RESULT_MAX 1800
 
@@ -67,7 +67,8 @@ static bool url_encode(const char *in, char *out, size_t cap)
     size_t used = 0;
     for (const unsigned char *p = (const unsigned char *)in; *p; ++p) {
         unsigned char c = *p;
-        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
             if (used + 1 >= cap) return false;
             out[used++] = (char)c;
         } else if (c == ' ') {
@@ -82,97 +83,126 @@ static bool url_encode(const char *in, char *out, size_t cap)
     return true;
 }
 
+/* Parse both DuckDuckGo Lite (result-link) and HTML (result__a) anchors.
+ * Walk complete <a> tags so href works regardless of attribute order. */
 static unsigned parse_ddg_results(const char *html, char *out, size_t cap)
 {
     out[0] = '\0';
     const char *p = html;
     unsigned count = 0;
     while (p && *p && count < 4) {
-        const char *a = strstr(p, "class=\"result__a\"");
-        if (!a) a = strstr(p, "class='result__a'");
+        const char *a = strstr(p, "<a");
         if (!a) break;
         const char *gt = strchr(a, '>');
         if (!gt) break;
         const char *end = strstr(gt + 1, "</a>");
         if (!end) break;
-        char title[240] = {0};
-        append_text(title, sizeof(title), gt + 1, (size_t)(end - gt - 1));
-        const char *href = strstr(a, "href=\"");
-        if (!href) href = strstr(a, "href='");
-        char url[360] = {0};
-        if (href) {
-            char quote = href[5];
-            const char *u = href + 6;
-            const char *ue = strchr(u, quote);
-            if (ue && ue - u < (ptrdiff_t)sizeof(url)) {
-                size_t n = (size_t)(ue - u);
-                memcpy(url, u, n); url[n] = '\0';
+        const char *class1 = strstr(a, "result-link");
+        const char *class2 = strstr(a, "result__a");
+        bool is_result = (class1 && class1 < gt) || (class2 && class2 < gt);
+        if (is_result) {
+            char title[240] = {0};
+            append_text(title, sizeof(title), gt + 1, (size_t)(end - gt - 1));
+            char url[500] = {0};
+            const char *href = strstr(a, "href=");
+            if (href && href < gt) {
+                const char *u = href + 5;
+                while (u < gt && (*u == ' ' || *u == '\t')) ++u;
+                if (u < gt && (*u == '"' || *u == '\'')) {
+                    char quote = *u++;
+                    const char *ue = memchr(u, quote, (size_t)(gt - u));
+                    if (ue && (size_t)(ue - u) < sizeof(url)) {
+                        size_t n = (size_t)(ue - u);
+                        memcpy(url, u, n); url[n] = '\0';
+                    }
+                }
             }
-        }
-        const char *snippet_start = strstr(end + 4, "result__snippet");
-        char snippet[360] = {0};
-        if (snippet_start) {
-            const char *sgt = strchr(snippet_start, '>');
-            const char *se = sgt ? strchr(sgt + 1, '<') : NULL;
-            if (sgt && se) append_text(snippet, sizeof(snippet), sgt + 1, (size_t)(se - sgt - 1));
-        }
-        size_t used = strlen(out);
-        if (used + 4 < cap) {
-            snprintf(out + used, cap - used, "HASIL %u\nJudul: %s\nURL sumber: %s\nCuplikan: %s\n\n", count + 1, title[0] ? title : "(judul tidak tersedia)", url[0] ? url : "(URL tidak tersedia)", snippet[0] ? snippet : "(cuplikan tidak tersedia)");
-            count++;
+            char snippet[360] = {0};
+            const char *sn = strstr(end + 4, "result-snippet");
+            if (!sn) sn = strstr(end + 4, "result__snippet");
+            if (sn) {
+                const char *sgt = strchr(sn, '>');
+                const char *se = sgt ? strchr(sgt + 1, '<') : NULL;
+                if (sgt && se) append_text(snippet, sizeof(snippet), sgt + 1, (size_t)(se - sgt - 1));
+            }
+            if (title[0] && url[0]) {
+                size_t used = strlen(out);
+                if (used + 4 < cap) {
+                    int n = snprintf(out + used, cap - used,
+                        "HASIL %u\nJudul: %s\nURL sumber: %s\nCuplikan: %s\n\n",
+                        count + 1, title, url, snippet[0] ? snippet : "(cuplikan tidak tersedia)");
+                    if (n > 0 && (size_t)n < cap - used) ++count;
+                }
+            }
         }
         p = end + 4;
     }
-    if (!count) snprintf(out, cap, "Pencarian tidak menghasilkan cuplikan yang bisa dibaca. Situs pencarian mungkin mengubah format atau membatasi permintaan.");
     return count;
 }
 
 static void web_search_task(void *arg)
 {
     search_job_t *job = (search_job_t *)arg;
-    /* Let audio/network activity settle before starting a second TLS handshake. */
-    vTaskDelay(pdMS_TO_TICKS(300));
+    /* Avoid overlapping the search TLS handshake with the first audio burst. */
+    vTaskDelay(pdMS_TO_TICKS(500));
     ESP_LOGI(TAG, "TLS mulai: free_heap=%u min_free_heap=%u stack_hwm=%u",
              (unsigned)esp_get_free_heap_size(),
              (unsigned)esp_get_minimum_free_heap_size(),
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
+
     char encoded[SEARCH_QUERY_MAX * 3 + 1] = {0};
     char result[SEARCH_RESULT_MAX] = {0};
     search_http_buffer_t *body = (search_http_buffer_t *)calloc(1, sizeof(search_http_buffer_t));
     bool ok = body && url_encode(job->query, encoded, sizeof(encoded));
     if (ok) {
+        /* DuckDuckGo Lite first: /html has returned HTTP 202 challenge pages on ESP32. */
         char url[1024];
-        snprintf(url, sizeof(url), "https://html.duckduckgo.com/html/?q=%s", encoded);
+        snprintf(url, sizeof(url), "https://lite.duckduckgo.com/lite/?q=%s", encoded);
         esp_http_client_config_t cfg = {};
         cfg.url = url;
         cfg.method = HTTP_METHOD_GET;
         cfg.timeout_ms = 15000;
-        /* Keep this independent HTTP request conservative while Gemini audio is active. */
         cfg.keep_alive_enable = false;
         cfg.event_handler = search_http_event;
         cfg.user_data = body;
         cfg.crt_bundle_attach = esp_crt_bundle_attach;
-        cfg.buffer_size = 1024;
+        cfg.buffer_size = 2048;
         cfg.buffer_size_tx = 512;
-        esp_http_client_handle_t client_http = esp_http_client_init(&cfg);
-        if (client_http) {
-            esp_http_client_set_header(client_http, "User-Agent", "Mozilla/5.0 (compatible; ESP32WebSearch/1.0)");
-            esp_err_t err = esp_http_client_perform(client_http);
-            int status = esp_http_client_get_status_code(client_http);
+        esp_http_client_handle_t http = esp_http_client_init(&cfg);
+        if (http) {
+            esp_http_client_set_header(http, "User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36");
+            esp_http_client_set_header(http, "Accept", "text/html,application/xhtml+xml");
+            esp_http_client_set_header(http, "Accept-Language", "id-ID,id;q=0.9,en;q=0.8");
+            esp_err_t err = esp_http_client_perform(http);
+            int status = esp_http_client_get_status_code(http);
             if (err == ESP_OK && status == 200 && body->used > 0) {
                 unsigned parsed = parse_ddg_results(body->data, result, sizeof(result));
-                ESP_LOGI(TAG, "Pencarian selesai: HTTP %d, %u byte, hasil_terparse=%u, result_len=%u", status, (unsigned)body->used, parsed, (unsigned)strlen(result));
+                ESP_LOGI(TAG, "HTTP %d byte=%u parsed=%u result_len=%u",
+                         status, (unsigned)body->used, parsed, (unsigned)strlen(result));
+                if (parsed == 0) {
+                    ESP_LOGW(TAG, "HTTP 200 tetapi hasil tidak dikenali; prefix=%.*s", 100, body->data);
+                    snprintf(result, sizeof(result),
+                        "Pencarian web menerima HTTP 200 tetapi tidak menemukan hasil yang dapat dibaca. Format halaman mungkin berubah.");
+                }
             } else {
-                snprintf(result, sizeof(result), "Pencarian web gagal (HTTP %d, err=%s). Coba lagi nanti.", status, esp_err_to_name(err));
-                ESP_LOGW(TAG, "Pencarian gagal: HTTP=%d err=%s", status, esp_err_to_name(err));
+                ESP_LOGW(TAG, "HTTP pencarian gagal: status=%d err=%s body=%u",
+                         status, esp_err_to_name(err), (unsigned)body->used);
+                snprintf(result, sizeof(result), "Pencarian web gagal (HTTP %d, err=%s). Coba lagi nanti.",
+                         status, esp_err_to_name(err));
             }
-            esp_http_client_cleanup(client_http);
-        } else snprintf(result, sizeof(result), "Pencarian web gagal: tidak bisa membuat koneksi HTTP.");
-    } else snprintf(result, sizeof(result), "Pencarian web gagal: memori tidak cukup.");
+            esp_http_client_cleanup(http);
+        } else {
+            snprintf(result, sizeof(result), "Pencarian web gagal: tidak bisa membuat koneksi HTTP.");
+        }
+    } else {
+        snprintf(result, sizeof(result), "Pencarian web gagal: memori tidak cukup atau query terlalu panjang.");
+    }
+
     if (body) free(body);
-    /* Tool responses are placed on the existing TX queue; never write the socket from this worker. */
     if (!websocket_send_tool_response_text(job->id, "web_search", result))
-        ESP_LOGW(TAG, "Hasil pencarian tidak terkirim ke Gemini");
+        ESP_LOGW(TAG, "Hasil pencarian tidak terkirim ke Gemini (id=%s)", job->id);
+    else
+        ESP_LOGI(TAG, "Hasil pencarian dikirim ke Gemini (id=%s)", job->id);
     free(job);
     vTaskDelete(NULL);
 }
