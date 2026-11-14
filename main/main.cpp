@@ -240,7 +240,8 @@ static void led_status_task(void *arg)
 static void audio_task(void *arg)
 {
     (void)arg;
-    constexpr size_t AUDIO_BUFFER_SIZE = 8192;
+    /* Buffer up to ~1 second of 16 kHz PCM while WebSocket TX is back-pressured. */
+    constexpr size_t AUDIO_BUFFER_SIZE = 32768;
     uint8_t *audio_buffer = (uint8_t *)heap_caps_malloc(
         AUDIO_BUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     const char *audio_buffer_location = "PSRAM";
