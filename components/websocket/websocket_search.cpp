@@ -11,9 +11,9 @@
 #include <ctype.h>
 
 static const char *TAG = "WS_SEARCH";
-#define SEARCH_HTTP_MAX 16000
+#define SEARCH_HTTP_MAX 24000
 #define SEARCH_QUERY_MAX 240
-#define SEARCH_RESULT_MAX 1800
+#define SEARCH_RESULT_MAX 3000
 
 typedef struct {
     char id[96];
@@ -23,6 +23,7 @@ typedef struct {
 typedef struct {
     char data[SEARCH_HTTP_MAX + 1];
     size_t used;
+    bool truncated;
 } search_http_buffer_t;
 
 static esp_err_t search_http_event(esp_http_client_event_t *evt)
@@ -30,7 +31,11 @@ static esp_err_t search_http_event(esp_http_client_event_t *evt)
     search_http_buffer_t *b = (search_http_buffer_t *)evt->user_data;
     if (evt->event_id == HTTP_EVENT_ON_DATA && b && evt->data && evt->data_len > 0) {
         size_t n = (size_t)evt->data_len;
-        if (n > SEARCH_HTTP_MAX - b->used) n = SEARCH_HTTP_MAX - b->used;
+        if (n > SEARCH_HTTP_MAX - b->used) {
+            n = SEARCH_HTTP_MAX - b->used;
+            b->truncated = true;
+        }
+        if (n == 0 && evt->data_len > 0) b->truncated = true;
         if (n) {
             memcpy(b->data + b->used, evt->data, n);
             b->used += n;
@@ -177,8 +182,11 @@ static void web_search_task(void *arg)
             int status = esp_http_client_get_status_code(http);
             if (err == ESP_OK && status == 200 && body->used > 0) {
                 unsigned parsed = parse_ddg_results(body->data, result, sizeof(result));
-                ESP_LOGI(TAG, "HTTP %d byte=%u parsed=%u result_len=%u",
-                         status, (unsigned)body->used, parsed, (unsigned)strlen(result));
+                ESP_LOGI(TAG, "HTTP %d byte=%u truncated=%d parsed=%u result_len=%u",
+                         status, (unsigned)body->used, body->truncated ? 1 : 0,
+                         parsed, (unsigned)strlen(result));
+                ESP_LOGI(TAG, "Hasil ringkas untuk debug: %.*s",
+                         (int)(strlen(result) > 220 ? 220 : strlen(result)), result);
                 if (parsed == 0) {
                     ESP_LOGW(TAG, "HTTP 200 tetapi hasil tidak dikenali; prefix=%.*s", 100, body->data);
                     snprintf(result, sizeof(result),
