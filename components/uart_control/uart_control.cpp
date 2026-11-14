@@ -93,7 +93,7 @@ void uart_control_send_web_search(const char *text)
     for (const unsigned char *p = (const unsigned char *)text; *p; ++p) ++total;
 
     char header[48];
-    int hn = snprintf(header, sizeof(header), "WSRCH|BEGIN|%u\\n", (unsigned)total);
+    int hn = snprintf(header, sizeof(header), "WSRCH|BEGIN|%u\n", (unsigned)total);
     if (hn <= 0 || (size_t)hn >= sizeof(header)) return;
     uart_write_bytes(UART_CONTROL_NUM, header, hn);
 
@@ -104,17 +104,17 @@ void uart_control_send_web_search(const char *text)
         size_t n = 0;
         while (*p && n < 320) {
             unsigned char c = *p++;
-            chunk[n++] = (c == '\\r' || c == '\\n') ? ' ' : (char)c;
+            chunk[n++] = (c == '\r' || c == '\n') ? ' ' : (char)c;
         }
         char prefix[48];
         int pn = snprintf(prefix, sizeof(prefix), "WSRCH|DATA|%u|", (unsigned)offset);
         if (pn <= 0 || (size_t)pn >= sizeof(prefix)) return;
         uart_write_bytes(UART_CONTROL_NUM, prefix, pn);
         uart_write_bytes(UART_CONTROL_NUM, chunk, n);
-        uart_write_bytes(UART_CONTROL_NUM, "\\n", 1);
+        uart_write_bytes(UART_CONTROL_NUM, "\n", 1);
         offset += n;
     }
-    uart_write_bytes(UART_CONTROL_NUM, "WSRCH|END\\n", 11);
+    uart_write_bytes(UART_CONTROL_NUM, "WSRCH|END\n", sizeof("WSRCH|END\n") - 1);
     ESP_LOGI(TAG, "Hasil pencarian dikirim ke UART: %u byte", (unsigned)total);
 }
 
