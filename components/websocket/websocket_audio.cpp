@@ -17,6 +17,15 @@
 static const char *TAG = "WS_AUDIO";
 extern "C" void oled2_face_set_speaker_level(uint8_t level);
 static volatile bool audio_clear_pending = false;
+/* Hold microphone uplink during web search/tool handoff without disabling I2S capture. */
+volatile bool websocket_mic_uplink_paused = false;
+
+void websocket_set_mic_uplink_paused(bool paused)
+{
+    if (websocket_mic_uplink_paused == paused) return;
+    websocket_mic_uplink_paused = paused;
+    ESP_LOGI(TAG, "MIC uplink %s (capture tetap aktif; frame selama jeda dibuang)", paused ? "PAUSED" : "RESUMED");
+}
 static StaticSemaphore_t audio_send_mutex_storage;
 static SemaphoreHandle_t audio_send_mutex = NULL;
 #define AUDIO_OUTPUT_SAMPLE_RATE 24000U
@@ -83,6 +92,7 @@ void check_audio_playback_complete(void)
     const int64_t balance = (int64_t)audio_bytes_received - (int64_t)accounted;
     ESP_LOGI(TAG, "AUDIO PLAYBACK COMPLETE: received=%llu queued=%llu played=%llu pending=0 queue_dropped=%llu i2s_dropped=%llu balance=%lld", (unsigned long long)audio_bytes_received, (unsigned long long)audio_bytes_queued, (unsigned long long)audio_bytes_played, (unsigned long long)audio_bytes_dropped, (unsigned long long)audio_bytes_playback_dropped, (long long)balance);
     audio_playback_complete_event = true;
+    websocket_set_mic_uplink_paused(false);
     oled2_face_set_speaker_level(0);
     servo_head_set_speaking(false);
     face_set_speech_level(0);
@@ -225,6 +235,7 @@ void clear_audio_buffer(void)
     }
     audio_turn_complete_pending = false;
     audio_turn_active = false;
+    websocket_set_mic_uplink_paused(false);
     audio_hal_set_mic_enabled(true);
     face_set_speech_level(0);
     oled2_face_set_speaker_level(0);
