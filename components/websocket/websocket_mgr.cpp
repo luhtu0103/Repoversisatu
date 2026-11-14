@@ -407,7 +407,13 @@ void websocket_schedule_setup(uint32_t generation)
     if (!websocket_tx_queue || !is_connected || websocket_tx_error || generation != websocket_connection_generation) return;
     ws_tx_command_t cmd = {};
     cmd.type = WS_TX_COMMAND_SETUP; cmd.generation = generation;
-    if (xQueueSend(websocket_tx_queue, &cmd, pdMS_TO_TICKS(1000)) == pdTRUE) ESP_LOGI(TAG, "Setup Gemini dijadwalkan melalui TX worker: generation=%lu", (unsigned long)generation);
+    if (xQueueSend(websocket_tx_queue, &cmd, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        ESP_LOGI(TAG, "Setup Gemini dijadwalkan melalui TX worker: generation=%lu", (unsigned long)generation);
+    } else {
+        websocket_set_backpressured(true);
+        ESP_LOGW(TAG, "Setup TX tidak masuk antrean; hard pause mic aktif queue=%u",
+                 (unsigned)uxQueueMessagesWaiting(websocket_tx_queue));
+    }
 }
 
 void websocket_app_start(void)
