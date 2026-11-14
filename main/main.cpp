@@ -201,7 +201,7 @@ static volatile bool assistant_active = false;
 static volatile bool led_boot_phase = true;
 static volatile bool led_wifi_config_mode = false;
 static volatile bool mic_voice_detected = false;
-static int64_t connect_start_us = 0;
+static int64_t disconnect_wait_start_us = 0;
 
 static void led_status_task(void *arg)
 {
@@ -396,7 +396,7 @@ static void audio_task(void *arg)
                     ESP_LOGW(TAG, ">>> WAKE WORD TERDETEKSI: HI, ESP (id=%d)", wake_result);
                     display_status("Wakeword terdeteksi");
                     assistant_active = true;
-                    connect_start_us = esp_timer_get_time();
+                    disconnect_wait_start_us = 0;
                     face_set_state(FACE_THINKING);
                     websocket_app_start();
                     buffer_pos = 0;
@@ -429,23 +429,30 @@ static void audio_task(void *arg)
             tx_backpressure_start_us = 0;
             consecutive_tx_enqueue_failures = 0;
 
-            /* Match RepoV3: the 15-second timeout is measured from session start,
-             * not from the latest disconnect. A disconnect after that window
-             * therefore returns to wake-word mode without another 15-second wait. */
-            if (esp_timer_get_time() - connect_start_us > 15 * 1000000LL) {
-                ESP_LOGW(TAG, "WebSocket tidak pulih dalam 15 detik; akhiri sesi dan kembali ke wake word.");
+            /*
+             * Give the reconnect manager a full 15 seconds after each loss of
+             * connectivity. Measuring from the original session start causes a
+             * healthy long-running session to abandon reconnect immediately
+             * when its transport resets.
+             */
+            const int64_t now_us = esp_timer_get_time();
+            if (disconnect_wait_start_us == 0) disconnect_wait_start_us = now_us;
+            if (now_us - disconnect_wait_start_us > 15 * 1000000LL) {
+                ESP_LOGW(TAG, "WebSocket tidak pulih dalam 15 detik setelah terputus; akhiri sesi dan kembali ke wake word.");
                 display_status("Menunggu wakeword");
                 websocket_request_fresh_session_reset();
                 websocket_disconnect();
                 assistant_active = false;
                 face_set_state(FACE_SLEEP);
                 buffer_pos = 0;
+                disconnect_wait_start_us = 0;
                 continue;
             }
             buffer_pos = 0;
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
+        disconnect_wait_start_us = 0;
 
         // Gemini Live receives microphone audio continuously while the speaker is idle.
         // 1280 bytes = 640 samples = 40 ms at 16 kHz mono PCM16. A 40 ms
