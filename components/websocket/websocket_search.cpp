@@ -283,33 +283,76 @@ static void web_search_task(void *arg)
     search_http_buffer_t *body = (search_http_buffer_t *)calloc(1, sizeof(search_http_buffer_t));
     bool ok = body && url_encode(job->query, encoded, sizeof(encoded));
     if (ok) {
-        /* Try Lite first, then the alternate DuckDuckGo HTML endpoint if
-           Lite returns an anti-bot/challenge response (often HTTP 202). */
-        char url[1024];
-        int status = 0;
-        snprintf(url, sizeof(url), "https://lite.duckduckgo.com/lite/?q=%s", encoded);
-        bool found = try_search_endpoint(url, body, result, sizeof(result), &status);
+        /* DuckDuckGo can return HTTP 202 challenge pages intermittently.
+         * Try Lite first, then the HTML endpoint with a fresh response buffer. */
+        const char *endpoints[] = {
+            "https://lite.duckduckgo.com/lite/?q=%s",
+            "https://html.duckduckgo.com/html/?q=%s"
+        };
+        int last_status = 0;
+        esp_err_t last_err = ESP_FAIL;
+        bool got_results = false;
 
-        if (!found) {
-            snprintf(url, sizeof(url), "https://html.duckduckgo.com/html/?q=%s", encoded);
-            ESP_LOGW(TAG, "Endpoint pertama tidak menghasilkan hasil; mencoba endpoint cadangan");
-            found = try_search_endpoint(url, body, result, sizeof(result), &status);
+        for (size_t attempt = 0; attempt < sizeof(endpoints) / sizeof(endpoints[0]); ++attempt) {
+            memset(body, 0, sizeof(*body));
+            result[0] = '\0';
+            char url[1024];
+            snprintf(url, sizeof(url), endpoints[attempt], encoded);
+
+            esp_http_client_config_t cfg = {};
+            cfg.url = url;
+            cfg.method = HTTP_METHOD_GET;
+            cfg.timeout_ms = 15000;
+            cfg.keep_alive_enable = false;
+            cfg.event_handler = search_http_event;
+            cfg.user_data = body;
+            cfg.crt_bundle_attach = esp_crt_bundle_attach;
+            cfg.buffer_size = 2048;
+            cfg.buffer_size_tx = 512;
+
+            esp_http_client_handle_t http = esp_http_client_init(&cfg);
+            if (!http) {
+                last_err = ESP_FAIL;
+                ESP_LOGW(TAG, "Tidak bisa membuat HTTP client (endpoint=%u)", (unsigned)attempt + 1);
+                continue;
+            }
+
+            esp_http_client_set_header(http, "User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36");
+            esp_http_client_set_header(http, "Accept", "text/html,application/xhtml+xml");
+            esp_http_client_set_header(http, "Accept-Language", "id-ID,id;q=0.9,en;q=0.8");
+            last_err = esp_http_client_perform(http);
+            last_status = esp_http_client_get_status_code(http);
+
+            if (last_err == ESP_OK && last_status == 200 && body->used > 0) {
+                unsigned parsed = parse_ddg_results(body->data, result, sizeof(result));
+                ESP_LOGI(TAG, "HTTP %d endpoint=%u byte=%u truncated=%d parsed=%u result_len=%u",
+                         last_status, (unsigned)attempt + 1, (unsigned)body->used,
+                         body->truncated ? 1 : 0, parsed, (unsigned)strlen(result));
+                if (parsed > 0) {
+                    got_results = true;
+                    ESP_LOGI(TAG, "Hasil ringkas untuk debug: %.*s",
+                             (int)(strlen(result) > 220 ? 220 : strlen(result)), result);
+                    esp_http_client_cleanup(http);
+                    break;
+                }
+                ESP_LOGW(TAG, "HTTP 200 tetapi format hasil tidak dikenali; endpoint=%u prefix=%.*s",
+                         (unsigned)attempt + 1, 100, body->data);
+            } else {
+                ESP_LOGW(TAG, "Endpoint pencarian %u gagal: HTTP=%d err=%s body=%u",
+                         (unsigned)attempt + 1, last_status, esp_err_to_name(last_err),
+                         (unsigned)body->used);
+            }
+            esp_http_client_cleanup(http);
         }
 
-        if (found) {
-            ESP_LOGI(TAG, "Pencarian berhasil: hasil_len=%u", (unsigned)strlen(result));
-            ESP_LOGI(TAG, "Hasil ringkas untuk debug: %.*s",
-                     (int)(strlen(result) > 220 ? 220 : strlen(result)), result);
-        } else {
+        if (!got_results) {
             snprintf(result, sizeof(result),
-                     "Pencarian web belum berhasil setelah mencoba dua endpoint DuckDuckGo (HTTP terakhir %d). Silakan coba lagi nanti.",
-                     status);
-            ESP_LOGW(TAG, "Semua endpoint pencarian gagal; HTTP terakhir=%d", status);
+                     "Pencarian web gagal setelah mencoba 2 endpoint DuckDuckGo (HTTP %d, err=%s). Coba ulang beberapa saat lagi.",
+                     last_status, esp_err_to_name(last_err));
         }
     } else {
         snprintf(result, sizeof(result), "Pencarian web gagal: memori tidak cukup atau query terlalu panjang.");
     }
-
     if (body) free(body);
     uart_control_send_web_search(result);
     if (!websocket_send_tool_response_text(job->id, "web_search", result))
