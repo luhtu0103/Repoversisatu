@@ -19,8 +19,8 @@
 #define WS_RX_STREAM_THRESHOLD (8 * 1024)
 #define WS_RX_STREAM_COMPACT_SIZE (12 * 1024)
 #define WS_TX_AUDIO_SIZE 3200
-/* Sixteen 1280-byte microphone frames provide about 640 ms of queue headroom. */
-#define WS_TX_QUEUE_LENGTH 16
+/* Thirty-two microphone frames provide more TX headroom during network congestion. */
+#define WS_TX_QUEUE_LENGTH 32
 #define WS_RX_QUEUE_LENGTH WS_RX_SLOT_COUNT
 
 typedef enum { WS_TX_COMMAND_SETUP = 1, WS_TX_COMMAND_AUDIO = 2, WS_TX_COMMAND_TEXT = 3 } ws_tx_command_type_t;
