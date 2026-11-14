@@ -293,11 +293,15 @@ static void web_search_task(void *arg)
         esp_err_t last_err = ESP_FAIL;
         bool got_results = false;
 
-        for (size_t attempt = 0; attempt < sizeof(endpoints) / sizeof(endpoints[0]); ++attempt) {
+        const size_t endpoint_count = sizeof(endpoints) / sizeof(endpoints[0]);
+        /* Retry each endpoint once because DDG intermittently returns HTTP 202 challenges. */
+        for (size_t attempt = 0; attempt < endpoint_count * 2; ++attempt) {
+            if (attempt > 0) vTaskDelay(pdMS_TO_TICKS(400));
+            const size_t endpoint_index = attempt % endpoint_count;
             memset(body, 0, sizeof(*body));
             result[0] = '\0';
             char url[1024];
-            snprintf(url, sizeof(url), endpoints[attempt], encoded);
+            snprintf(url, sizeof(url), endpoints[endpoint_index], encoded);
 
             esp_http_client_config_t cfg = {};
             cfg.url = url;
@@ -347,7 +351,7 @@ static void web_search_task(void *arg)
 
         if (!got_results) {
             snprintf(result, sizeof(result),
-                     "Pencarian web gagal setelah mencoba 2 endpoint DuckDuckGo (HTTP %d, err=%s). Coba ulang beberapa saat lagi.",
+                     "Pencarian web gagal setelah 4 percobaan pada 2 endpoint DuckDuckGo (HTTP %d, err=%s). Coba ulang beberapa saat lagi.",
                      last_status, esp_err_to_name(last_err));
         }
     } else {
