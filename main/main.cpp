@@ -34,6 +34,9 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 
+constexpr uint32_t AUDIO_VOICE_ENERGY_THRESHOLD_SQ = 1440000;  // 1200^2
+constexpr time_t NTP_FALLBACK_TIMESTAMP = 1770000000;  // 2026-02-02 UTC
+
 static const char *TAG = "MAIN";
 #define BOOT_BUTTON_GPIO GPIO_NUM_0
 static bool resolve_host(const char *label, const char *host, const char *port, char *resolved_ip, size_t resolved_ip_len)
@@ -194,7 +197,7 @@ static void sync_sntp_time(void)
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL); esp_sntp_setservername(0, "time.google.com"); esp_sntp_setservername(1, "id.pool.ntp.org"); esp_sntp_setservername(2, "pool.ntp.org"); esp_sntp_init();
     int retry = 0; const int max_retries = 10; time_t now = 0; struct tm timeinfo = {};
     while (retry < max_retries) { time(&now); localtime_r(&now, &timeinfo); if (timeinfo.tm_year >= (2024 - 1900)) { ESP_LOGI(TAG, "Waktu cocok! Tahun: %d", timeinfo.tm_year + 1900); display_status("Jam Cocok!"); vTaskDelay(pdMS_TO_TICKS(1000)); return; } vTaskDelay(pdMS_TO_TICKS(500)); retry++; }
-    ESP_LOGW(TAG, "NTP gagal. Menggunakan waktu fallback."); struct timeval tv = { .tv_sec = 1770000000, .tv_usec = 0 }; settimeofday(&tv, NULL); display_status("Jam Set Fallback"); vTaskDelay(pdMS_TO_TICKS(1000));
+    ESP_LOGW(TAG, "NTP gagal. Menggunakan waktu fallback."); struct timeval tv = { .tv_sec = NTP_FALLBACK_TIMESTAMP, .tv_usec = 0 }; settimeofday(&tv, NULL); display_status("Jam Set Fallback"); vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
 static volatile bool assistant_active = false;
@@ -302,6 +305,16 @@ static void audio_task(void *arg)
             display_status("Menunggu wakeword");
             continue;
         }
+        // Do not read, buffer, or enqueue microphone audio while uplink is paused
+        // for web search/tool handoff. The capture hardware remains enabled.
+        if (websocket_mic_uplink_paused) {
+            buffer_pos = 0;
+            tx_backpressure_start_us = 0;
+            consecutive_tx_enqueue_failures = 0;
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
         // WakeNet gets the same raw I2S PCM path as Repo5. Keep NSNet2 and
         // conversation gain exclusively on the active Gemini audio path.
         const bool mic_buffer_full = buffer_pos >= AUDIO_BUFFER_SIZE;
@@ -352,7 +365,7 @@ static void audio_task(void *arg)
                     energy_sum += (uint64_t)(sample * sample);
                 }
                 const uint32_t mean_energy = (uint32_t)(energy_sum / sample_count);
-                mic_voice_detected = mean_energy > (uint32_t)(1200 * 1200);
+                mic_voice_detected = mean_energy > AUDIO_VOICE_ENERGY_THRESHOLD_SQ;
             } else {
                 mic_voice_detected = false;
             }
