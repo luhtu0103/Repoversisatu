@@ -146,7 +146,7 @@ void prosesFrameWebSearch(const char* line) {
       ? "Hasil pencarian diterima"
       : "Hasil pencarian tidak lengkap";
     statusSistem = webSearchStatus;
-    Serial.printf("WSRCH: %u/%u byte, complete=%d\\n",
+    Serial.printf("WSRCH: %u/%u byte, complete=%d\n",
                   (unsigned)webSearchReceived, (unsigned)webSearchExpected,
                   webSearchComplete ? 1 : 0);
     return;
