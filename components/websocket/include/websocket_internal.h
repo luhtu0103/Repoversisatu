@@ -19,13 +19,15 @@
 #define WS_RX_STREAM_THRESHOLD (8 * 1024)
 #define WS_RX_STREAM_COMPACT_SIZE (12 * 1024)
 #define WS_TX_AUDIO_SIZE 3200
-/* Thirty-two microphone frames provide more TX headroom during network congestion. */
-#define WS_TX_QUEUE_LENGTH 32
+/* Sixty-four commands absorb short TX stalls without immediately dropping mic audio. */
+#define WS_TX_QUEUE_LENGTH 64
 #define WS_RX_QUEUE_LENGTH WS_RX_SLOT_COUNT
 
 typedef enum { WS_TX_COMMAND_SETUP = 1, WS_TX_COMMAND_AUDIO = 2, WS_TX_COMMAND_TEXT = 3 } ws_tx_command_type_t;
 typedef struct { ws_tx_command_type_t type; uint32_t generation; uint16_t len; uint8_t *data; } ws_tx_command_t;
 extern QueueHandle_t websocket_tx_queue; extern TaskHandle_t websocket_tx_task_handle;
+bool websocket_is_backpressured(void);
+void websocket_set_backpressured(bool active);
 typedef enum {
     WS_TX_ENQUEUE_OK = 0,
     WS_TX_ENQUEUE_INVALID_FRAME,
