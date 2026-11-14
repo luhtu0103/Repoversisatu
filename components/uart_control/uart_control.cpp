@@ -104,7 +104,7 @@ void uart_control_send_web_search(const char *text)
         size_t n = 0;
         while (*p && n < 320) {
             unsigned char c = *p++;
-            chunk[n++] = (c == '\r' || c == '\n') ? ' ' : (char)c;
+            chunk[n++] = (c == '\r') ? ' ' : (c == '\n' ? (char)0x1E : (char)c);
         }
         char prefix[48];
         int pn = snprintf(prefix, sizeof(prefix), "WSRCH|DATA|%u|", (unsigned)offset);
