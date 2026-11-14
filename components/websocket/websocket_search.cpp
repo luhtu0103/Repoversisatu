@@ -110,7 +110,7 @@ static unsigned parse_ddg_results(const char *html, char *out, size_t cap)
                 while (u < gt && (*u == ' ' || *u == '\t')) ++u;
                 if (u < gt && (*u == '"' || *u == '\'')) {
                     char quote = *u++;
-                    const char *ue = memchr(u, quote, (size_t)(gt - u));
+                    const char *ue = (const char *)memchr(u, quote, (size_t)(gt - u));
                     if (ue && (size_t)(ue - u) < sizeof(url)) {
                         size_t n = (size_t)(ue - u);
                         memcpy(url, u, n); url[n] = '\0';
