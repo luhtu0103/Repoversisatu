@@ -472,15 +472,25 @@ void websocket_request_resume_reconnect(void)
         return;
     }
     if (websocket_start_pending) return; /* one reconnect attempt per disconnect */
-    if (!client || !session_resumable || session_handle[0] == '\0') {
-        ESP_LOGW(TAG, "Resume reconnect tidak tersedia: client/handle tidak valid");
+    if (!client) {
+        ESP_LOGW(TAG, "Reconnect tidak dijadwalkan: client sudah NULL");
         return;
     }
+
     websocket_start_pending = true;
-    ESP_LOGW(TAG, "Koneksi terputus/GOAWAY: jadwalkan reconnect dengan handle sesi Gemini");
+    if (session_resumable && session_handle[0] != '\0') {
+        ESP_LOGW(TAG, "Koneksi terputus/GOAWAY: reconnect dengan handle sesi Gemini");
+    } else {
+        /*
+         * A transport reset can happen before Gemini provides a resumable handle.
+         * Do not leave the device permanently disconnected: destroy the old client,
+         * clear stale turn/session state, then start a clean Gemini session.
+         */
+        websocket_fresh_session_reset_pending = true;
+        ESP_LOGW(TAG, "Handle resumption tidak tersedia: reconnect memakai sesi Gemini baru");
+    }
     websocket_disconnect();
 }
-
 bool websocket_take_standby_request(void)
 {
     bool requested = websocket_standby_request;
