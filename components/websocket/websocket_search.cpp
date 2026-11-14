@@ -89,8 +89,60 @@ static bool url_encode(const char *in, char *out, size_t cap)
     return true;
 }
 
+/* Decode percent escapes in DuckDuckGo's uddg redirect parameter. */
+static void percent_decode_url(const char *src, size_t len, char *dst, size_t cap)
+{
+    size_t out = 0;
+    for (size_t i = 0; i < len && out + 1 < cap; ++i) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '%' && i + 2 < len) {
+            int hi = src[i + 1] >= '0' && src[i + 1] <= '9' ? src[i + 1] - '0' :
+                     src[i + 1] >= 'A' && src[i + 1] <= 'F' ? src[i + 1] - 'A' + 10 :
+                     src[i + 1] >= 'a' && src[i + 1] <= 'f' ? src[i + 1] - 'a' + 10 : -1;
+            int lo = src[i + 2] >= '0' && src[i + 2] <= '9' ? src[i + 2] - '0' :
+                     src[i + 2] >= 'A' && src[i + 2] <= 'F' ? src[i + 2] - 'A' + 10 :
+                     src[i + 2] >= 'a' && src[i + 2] <= 'f' ? src[i + 2] - 'a' + 10 : -1;
+            if (hi >= 0 && lo >= 0) {
+                c = (unsigned char)((hi << 4) | lo);
+                i += 2;
+            }
+        } else if (c == '+') {
+            c = ' ';
+        }
+        if (c >= 0x20 && c != 0x7f) dst[out++] = (char)c;
+    }
+    dst[out] = '\0';
+}
+
+/* Convert DuckDuckGo redirect links to the original source URL. */
+static void normalize_result_url(char *url, size_t cap)
+{
+    if (!url || !url[0]) return;
+
+    char *uddg = strstr(url, "uddg=");
+    if (uddg && (strstr(url, "duckduckgo.com/l/") || strstr(url, "duckduckgo.com/l/?"))) {
+        const char *value = uddg + 5;
+        const char *stop = value;
+        while (*stop && *stop != '&' && *stop != '#') ++stop;
+        char decoded[500] = {0};
+        percent_decode_url(value, (size_t)(stop - value), decoded, sizeof(decoded));
+        if (strncmp(decoded, "http://", 7) == 0 || strncmp(decoded, "https://", 8) == 0) {
+            strlcpy(url, decoded, cap);
+            return;
+        }
+    }
+
+    /* Make protocol-relative links usable from the DevKit page. */
+    if (strncmp(url, "//", 2) == 0) {
+        char absolute[500];
+        snprintf(absolute, sizeof(absolute), "https:%s", url);
+        strlcpy(url, absolute, cap);
+    }
+}
+
 /* Parse both DuckDuckGo Lite (result-link) and HTML (result__a) anchors.
- * Walk complete <a> tags so href works regardless of attribute order. */
+ * Keep snippet lookup inside the current result to avoid leaking text from
+ * the next result when a snippet is missing. */
 static unsigned parse_ddg_results(const char *html, char *out, size_t cap)
 {
     out[0] = '\0';
@@ -119,18 +171,35 @@ static unsigned parse_ddg_results(const char *html, char *out, size_t cap)
                     const char *ue = (const char *)memchr(u, quote, (size_t)(gt - u));
                     if (ue && (size_t)(ue - u) < sizeof(url)) {
                         size_t n = (size_t)(ue - u);
-                        memcpy(url, u, n); url[n] = '\0';
+                        size_t j = 0;
+                        for (size_t i = 0; i < n && j + 1 < sizeof(url); ++i) {
+                            if (i + 4 < n && strncmp(u + i, "&amp;", 5) == 0) {
+                                url[j++] = '&';
+                                i += 4;
+                            } else {
+                                url[j++] = u[i];
+                            }
+                        }
+                        url[j] = '\0';
+                        normalize_result_url(url, sizeof(url));
                     }
                 }
             }
+
             char snippet[360] = {0};
+            const char *next_result = strstr(end + 4, "result-link");
+            const char *next_html_result = strstr(end + 4, "result__a");
+            if (!next_result || (next_html_result && next_html_result < next_result))
+                next_result = next_html_result;
             const char *sn = strstr(end + 4, "result-snippet");
-            if (!sn) sn = strstr(end + 4, "result__snippet");
-            if (sn) {
+            if (!sn || (next_result && sn >= next_result)) sn = strstr(end + 4, "result__snippet");
+            if (sn && (!next_result || sn < next_result)) {
                 const char *sgt = strchr(sn, '>');
                 const char *se = sgt ? strchr(sgt + 1, '<') : NULL;
-                if (sgt && se) append_text(snippet, sizeof(snippet), sgt + 1, (size_t)(se - sgt - 1));
+                if (sgt && se && (!next_result || sgt < next_result))
+                    append_text(snippet, sizeof(snippet), sgt + 1, (size_t)(se - sgt - 1));
             }
+
             if (title[0] && url[0]) {
                 size_t used = strlen(out);
                 if (used + 4 < cap) {
