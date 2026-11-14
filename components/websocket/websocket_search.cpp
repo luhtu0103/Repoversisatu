@@ -355,10 +355,12 @@ static void web_search_task(void *arg)
     }
     if (body) free(body);
     uart_control_send_web_search(result);
-    if (!websocket_send_tool_response_text(job->id, "web_search", result))
-        ESP_LOGW(TAG, "Hasil pencarian tidak terkirim ke Gemini (id=%s)", job->id);
-    else
-        ESP_LOGI(TAG, "Hasil pencarian dikirim ke Gemini (id=%s)", job->id);
+    if (!websocket_send_tool_response_text(job->id, "web_search", result)) {
+        ESP_LOGW(TAG, "Hasil pencarian tidak terkirim ke Gemini (id=%s); mic uplink dibuka agar sesi tidak terkunci", job->id);
+        websocket_set_mic_uplink_paused(false);
+    } else {
+        ESP_LOGI(TAG, "Hasil pencarian dikirim ke Gemini (id=%s); mic tetap ditahan sampai balasan selesai", job->id);
+    }
     free(job);
     vTaskDelete(NULL);
 }
