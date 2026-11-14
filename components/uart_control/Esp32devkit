@@ -142,6 +142,13 @@ void prosesFrameWebSearch(const char* line) {
   if (strcmp(line, "WSRCH|END") == 0) {
     webSearchFrameActive = false;
     webSearchComplete = (webSearchReceived == webSearchExpected);
+    if (webSearchComplete) {
+      // UART frames use byte 0x1E as a safe stand-in for newline.
+      for (size_t i = 0; i < webSearchReceived; ++i) {
+        if ((unsigned char)webSearchResult[i] == 0x1E) webSearchResult[i] = '\n';
+      }
+      webSearchResult[webSearchReceived] = '\0';
+    }
     webSearchStatus = webSearchComplete
       ? "Hasil pencarian diterima"
       : "Hasil pencarian tidak lengkap";
