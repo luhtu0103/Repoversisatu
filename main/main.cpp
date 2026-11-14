@@ -305,13 +305,13 @@ static void audio_task(void *arg)
             display_status("Menunggu wakeword");
             continue;
         }
-        // Do not read, buffer, or enqueue microphone audio while uplink is paused
-        // for web search/tool handoff. The capture hardware remains enabled.
-        if (websocket_mic_uplink_paused) {
+        // Hard pause before any mic read or TX enqueue during search or TX congestion.
+        // The capture hardware stays enabled; buffered audio is discarded, not replayed.
+        if (websocket_mic_uplink_paused || websocket_is_backpressured()) {
             buffer_pos = 0;
             tx_backpressure_start_us = 0;
             consecutive_tx_enqueue_failures = 0;
-            vTaskDelay(pdMS_TO_TICKS(10));
+            vTaskDelay(pdMS_TO_TICKS(5));
             continue;
         }
 
