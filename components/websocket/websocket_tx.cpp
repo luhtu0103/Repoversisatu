@@ -107,6 +107,7 @@ bool websocket_send_touch_prompt(bool angry)
     cmd.len = (uint16_t)len;
     cmd.data = copy;
     if (xQueueSend(websocket_tx_queue, &cmd, 0) != pdTRUE) {
+        websocket_set_backpressured(true);
         free(copy);
         ESP_LOGW(TAG, "Touch prompt ditahan: TX queue penuh");
         return false;

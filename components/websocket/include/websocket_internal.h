@@ -9,22 +9,25 @@
 #include <stddef.h>
 #include <stdint.h>
 #define SESSION_HANDLE_MAX_LEN 1024
-#define WS_RX_MAX_PAYLOAD_SIZE (48 * 1024)
+/* Gemini Live audio JSON can exceed 48 KiB; streamed parsing compacts audio before queueing. */
+#define WS_RX_MAX_PAYLOAD_SIZE (128 * 1024)
 #define WS_RX_SLOT_SIZE (40 * 1024)
 /* v7.0.31: increase persistent RX slot headroom after v7.0.30 showed
  * buffer_drop=4 and queue_hwm=4 during Gemini audio bursts. */
-#define WS_RX_SLOT_COUNT 16
+#define WS_RX_SLOT_COUNT 24
 #define WS_RX_TERMINATOR_SIZE 1
 #define WS_RX_STREAM_THRESHOLD (8 * 1024)
-#define WS_RX_STREAM_COMPACT_SIZE (8 * 1024)
+#define WS_RX_STREAM_COMPACT_SIZE (12 * 1024)
 #define WS_TX_AUDIO_SIZE 3200
-/* Eight 1280-byte microphone frames provide about 320 ms of queue headroom. */
-#define WS_TX_QUEUE_LENGTH 8
+/* Sixty-four commands absorb short TX stalls without immediately dropping mic audio. */
+#define WS_TX_QUEUE_LENGTH 64
 #define WS_RX_QUEUE_LENGTH WS_RX_SLOT_COUNT
 
 typedef enum { WS_TX_COMMAND_SETUP = 1, WS_TX_COMMAND_AUDIO = 2, WS_TX_COMMAND_TEXT = 3 } ws_tx_command_type_t;
 typedef struct { ws_tx_command_type_t type; uint32_t generation; uint16_t len; uint8_t *data; } ws_tx_command_t;
 extern QueueHandle_t websocket_tx_queue; extern TaskHandle_t websocket_tx_task_handle;
+bool websocket_is_backpressured(void);
+void websocket_set_backpressured(bool active);
 typedef enum {
     WS_TX_ENQUEUE_OK = 0,
     WS_TX_ENQUEUE_INVALID_FRAME,
@@ -43,7 +46,7 @@ extern esp_websocket_client_handle_t client; extern volatile bool is_connected; 
 extern volatile uint32_t websocket_last_rx_ms;
 extern volatile uint32_t websocket_last_tx_ms;
 extern volatile uint32_t websocket_tx_fail_count;
-extern StreamBufferHandle_t audio_stream; extern TaskHandle_t audio_playback_task_handle; extern volatile bool audio_turn_active; extern volatile bool audio_turn_complete_pending; extern volatile uint32_t websocket_connection_generation;
+extern StreamBufferHandle_t audio_stream; extern TaskHandle_t audio_playback_task_handle; extern volatile bool audio_turn_active; extern volatile bool audio_turn_complete_pending; extern volatile uint32_t websocket_connection_generation; extern volatile bool websocket_mic_uplink_paused;
 void websocket_schedule_setup(uint32_t generation);
 extern uint32_t audio_chunks_received; extern uint64_t audio_bytes_received; extern uint64_t audio_bytes_queued; extern uint32_t audio_write_calls; extern uint64_t audio_bytes_played; extern uint64_t audio_bytes_dropped; extern uint64_t audio_bytes_playback_dropped;
 void websocket_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data); void reset_rx_buffer(void); bool ensure_rx_buffer(size_t required_size); void process_websocket_payload(esp_websocket_event_data_t *data); void process_gemini_message(const char *json, size_t len); bool build_gemini_setup(char **output, size_t *output_len); void clear_session_handle(void); bool store_session_handle(const char *handle); size_t get_audio_pending_bytes(void); bool start_audio_playback(void); void clear_audio_buffer(void); void request_audio_buffer_clear(void); void reset_audio_turn_stats(void); void begin_audio_turn(void); bool queue_audio_pcm(const uint8_t *pcm, size_t len); void check_audio_playback_complete(void);
@@ -57,7 +60,8 @@ bool websocket_cleanup_is_pending(void);
 void websocket_cleanup_complete(void);
 bool websocket_send_tool_response(const char *id, const char *name, bool success);
 bool websocket_send_tool_response_text(const char *id, const char *name, const char *result);
+bool websocket_search_start(const char *id, const char *query);
 
 bool websocket_take_standby_request(void);
 void websocket_request_standby(void);
-bool websocket_take_audio_playback_complete(void);
+bool websocket_take_audio_playback_complete(void); void websocket_set_mic_uplink_paused(bool paused);

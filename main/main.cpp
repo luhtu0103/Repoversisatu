@@ -34,6 +34,9 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 
+constexpr uint32_t AUDIO_VOICE_ENERGY_THRESHOLD_SQ = 1440000;  // 1200^2
+constexpr time_t NTP_FALLBACK_TIMESTAMP = 1770000000;  // 2026-02-02 UTC
+
 static const char *TAG = "MAIN";
 #define BOOT_BUTTON_GPIO GPIO_NUM_0
 static bool resolve_host(const char *label, const char *host, const char *port, char *resolved_ip, size_t resolved_ip_len)
@@ -194,14 +197,14 @@ static void sync_sntp_time(void)
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL); esp_sntp_setservername(0, "time.google.com"); esp_sntp_setservername(1, "id.pool.ntp.org"); esp_sntp_setservername(2, "pool.ntp.org"); esp_sntp_init();
     int retry = 0; const int max_retries = 10; time_t now = 0; struct tm timeinfo = {};
     while (retry < max_retries) { time(&now); localtime_r(&now, &timeinfo); if (timeinfo.tm_year >= (2024 - 1900)) { ESP_LOGI(TAG, "Waktu cocok! Tahun: %d", timeinfo.tm_year + 1900); display_status("Jam Cocok!"); vTaskDelay(pdMS_TO_TICKS(1000)); return; } vTaskDelay(pdMS_TO_TICKS(500)); retry++; }
-    ESP_LOGW(TAG, "NTP gagal. Menggunakan waktu fallback."); struct timeval tv = { .tv_sec = 1770000000, .tv_usec = 0 }; settimeofday(&tv, NULL); display_status("Jam Set Fallback"); vTaskDelay(pdMS_TO_TICKS(1000));
+    ESP_LOGW(TAG, "NTP gagal. Menggunakan waktu fallback."); struct timeval tv = { .tv_sec = NTP_FALLBACK_TIMESTAMP, .tv_usec = 0 }; settimeofday(&tv, NULL); display_status("Jam Set Fallback"); vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
 static volatile bool assistant_active = false;
 static volatile bool led_boot_phase = true;
 static volatile bool led_wifi_config_mode = false;
 static volatile bool mic_voice_detected = false;
-static int64_t connect_start_us = 0;
+static int64_t disconnect_wait_start_us = 0;
 
 static void led_status_task(void *arg)
 {
@@ -240,7 +243,8 @@ static void led_status_task(void *arg)
 static void audio_task(void *arg)
 {
     (void)arg;
-    constexpr size_t AUDIO_BUFFER_SIZE = 8192;
+    /* Buffer up to ~1 second of 16 kHz PCM while WebSocket TX is back-pressured. */
+    constexpr size_t AUDIO_BUFFER_SIZE = 32768;
     uint8_t *audio_buffer = (uint8_t *)heap_caps_malloc(
         AUDIO_BUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     const char *audio_buffer_location = "PSRAM";
@@ -301,6 +305,16 @@ static void audio_task(void *arg)
             display_status("Menunggu wakeword");
             continue;
         }
+        // Hard pause before any mic read or TX enqueue during search or TX congestion.
+        // The capture hardware stays enabled; buffered audio is discarded, not replayed.
+        if (websocket_mic_uplink_paused || websocket_is_backpressured()) {
+            buffer_pos = 0;
+            tx_backpressure_start_us = 0;
+            consecutive_tx_enqueue_failures = 0;
+            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
+        }
+
         // WakeNet gets the same raw I2S PCM path as Repo5. Keep NSNet2 and
         // conversation gain exclusively on the active Gemini audio path.
         const bool mic_buffer_full = buffer_pos >= AUDIO_BUFFER_SIZE;
@@ -322,7 +336,12 @@ static void audio_task(void *arg)
             vTaskDelay(1);
             continue;
         }
-        if (mic_buffer_full) {
+        if (websocket_mic_uplink_paused) {
+            if (bytes_read > 0) mic_buffer_lost_bytes += bytes_read;
+            buffer_pos = 0; // Never buffer/replay speech captured during a web search.
+            tx_backpressure_start_us = 0;
+            consecutive_tx_enqueue_failures = 0;
+        } else if (mic_buffer_full) {
             if (bytes_read > 0) mic_buffer_lost_bytes += bytes_read;
             int64_t now_us = esp_timer_get_time();
             if (now_us - last_tx_diag_us >= 1000000) {
@@ -346,7 +365,7 @@ static void audio_task(void *arg)
                     energy_sum += (uint64_t)(sample * sample);
                 }
                 const uint32_t mean_energy = (uint32_t)(energy_sum / sample_count);
-                mic_voice_detected = mean_energy > (uint32_t)(1200 * 1200);
+                mic_voice_detected = mean_energy > AUDIO_VOICE_ENERGY_THRESHOLD_SQ;
             } else {
                 mic_voice_detected = false;
             }
@@ -390,7 +409,7 @@ static void audio_task(void *arg)
                     ESP_LOGW(TAG, ">>> WAKE WORD TERDETEKSI: HI, ESP (id=%d)", wake_result);
                     display_status("Wakeword terdeteksi");
                     assistant_active = true;
-                    connect_start_us = esp_timer_get_time();
+                    disconnect_wait_start_us = 0;
                     face_set_state(FACE_THINKING);
                     websocket_app_start();
                     buffer_pos = 0;
@@ -409,7 +428,6 @@ static void audio_task(void *arg)
                     while (gpio_get_level(BOOT_BUTTON_GPIO) == 0) vTaskDelay(pdMS_TO_TICKS(10));
                     ESP_LOGI(TAG, "Tombol ditekan! Memulai sesi...");
                     assistant_active = true;
-                    connect_start_us = esp_timer_get_time();
                     face_set_state(FACE_THINKING);
                     websocket_app_start();
                 }
@@ -423,23 +441,30 @@ static void audio_task(void *arg)
             tx_backpressure_start_us = 0;
             consecutive_tx_enqueue_failures = 0;
 
-            /* Match RepoV3: the 15-second timeout is measured from session start,
-             * not from the latest disconnect. A disconnect after that window
-             * therefore returns to wake-word mode without another 15-second wait. */
-            if (esp_timer_get_time() - connect_start_us > 15 * 1000000LL) {
-                ESP_LOGW(TAG, "WebSocket tidak pulih dalam 15 detik; akhiri sesi dan kembali ke wake word.");
+            /*
+             * Give the reconnect manager a full 15 seconds after each loss of
+             * connectivity. Measuring from the original session start causes a
+             * healthy long-running session to abandon reconnect immediately
+             * when its transport resets.
+             */
+            const int64_t now_us = esp_timer_get_time();
+            if (disconnect_wait_start_us == 0) disconnect_wait_start_us = now_us;
+            if (now_us - disconnect_wait_start_us > 15 * 1000000LL) {
+                ESP_LOGW(TAG, "WebSocket tidak pulih dalam 15 detik setelah terputus; akhiri sesi dan kembali ke wake word.");
                 display_status("Menunggu wakeword");
                 websocket_request_fresh_session_reset();
                 websocket_disconnect();
                 assistant_active = false;
                 face_set_state(FACE_SLEEP);
                 buffer_pos = 0;
+                disconnect_wait_start_us = 0;
                 continue;
             }
             buffer_pos = 0;
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
+        disconnect_wait_start_us = 0;
 
         // Gemini Live receives microphone audio continuously while the speaker is idle.
         // 1280 bytes = 640 samples = 40 ms at 16 kHz mono PCM16. A 40 ms

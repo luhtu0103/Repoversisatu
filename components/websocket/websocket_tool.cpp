@@ -5,6 +5,10 @@
 #include "cJSON.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 static const char *TAG = "WS_TOOL";
 
@@ -24,7 +28,8 @@ static bool supported_tool_name(const char *name)
         strcmp(name, "control_device") == 0 ||
         strcmp(name, "memory_save") == 0 ||
         strcmp(name, "memory_delete") == 0 ||
-        strcmp(name, "memory_read") == 0);
+        strcmp(name, "memory_read") == 0 ||
+        strcmp(name, "web_search") == 0);
 }
 
 static bool send_tool_payload(const char *id, const char *name, const char *result)
@@ -51,14 +56,29 @@ static bool send_tool_payload(const char *id, const char *name, const char *resu
     if (!payload) return false;
 
     size_t len = strlen(payload);
-    int sent = esp_websocket_client_send_text(client, payload, (int)len, pdMS_TO_TICKS(5000));
-    if (sent != (int)len) {
-        ESP_LOGW(TAG, "Tool response gagal dikirim: sent=%d expected=%u", sent, (unsigned)len);
+    if (len == 0 || len > UINT16_MAX || !websocket_tx_queue) {
         cJSON_free(payload);
         return false;
     }
-
-    ESP_LOGI(TAG, "Tool response terkirim: %s id=%s", name, id);
+    uint8_t *copy = (uint8_t *)malloc(len);
+    if (!copy) {
+        cJSON_free(payload);
+        return false;
+    }
+    memcpy(copy, payload, len);
+    ws_tx_command_t cmd = {};
+    cmd.type = WS_TX_COMMAND_TEXT;
+    cmd.generation = websocket_connection_generation;
+    cmd.len = (uint16_t)len;
+    cmd.data = copy;
+    /* Let queued microphone frames drain instead of losing a tool response when TX is full. */
+    if (xQueueSend(websocket_tx_queue, &cmd, pdMS_TO_TICKS(3000)) != pdTRUE) {
+        free(copy);
+        cJSON_free(payload);
+        ESP_LOGW(TAG, "TX queue tetap penuh setelah 3 detik; tool response gagal antre: %s", name);
+        return false;
+    }
+    ESP_LOGI(TAG, "Tool response masuk antrean TX: %s id=%s", name, id);
     cJSON_free(payload);
     return true;
 }

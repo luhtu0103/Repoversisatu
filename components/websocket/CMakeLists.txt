@@ -7,6 +7,7 @@ idf_component_register(
         "websocket_audio.cpp"
         "websocket_tx.cpp"
         "websocket_tool.cpp"
+        "websocket_search.cpp"
         "websocket_stack_wrap.c"
 
     INCLUDE_DIRS
@@ -15,6 +16,7 @@ idf_component_register(
     REQUIRES
         esp_websocket_client
         esp-tls
+        esp_http_client
         esp_event
         cjson
         mbedtls

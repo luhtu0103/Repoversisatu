@@ -208,6 +208,36 @@ static void add_memory_tools(cJSON *setup)
     }
 }
 
+static void add_web_search_tool(cJSON *setup)
+{
+    if (!setup) return;
+    cJSON *tools = cJSON_GetObjectItem(setup, "tools");
+    if (!cJSON_IsArray(tools)) return;
+    cJSON *tool = NULL, *decls = NULL;
+    cJSON_ArrayForEach(tool, tools) {
+        decls = cJSON_GetObjectItem(tool, "functionDeclarations");
+        if (cJSON_IsArray(decls)) break;
+        decls = NULL;
+    }
+    if (!decls) return;
+    cJSON *decl = cJSON_CreateObject();
+    if (!decl) return;
+    cJSON_AddStringToObject(decl, "name", "web_search");
+    /* Search must finish before Gemini continues with an answer based on unverified facts. */
+    cJSON_AddStringToObject(decl, "behavior", "BLOCKING");
+    cJSON_AddStringToObject(decl, "description",
+        "Cari informasi terkini di web saat pengguna bertanya tentang berita, fakta yang perlu diverifikasi, atau informasi yang mungkin berubah. Gunakan pencarian ini sebelum menjawab pertanyaan web. Layanan pencarian terpisah ini gratis dan hasilnya dapat terbatas. Jangan mengklaim sudah mencari jika tool gagal. Query harus ringkas dan spesifik. Setelah hasil pencarian untuk pertanyaan yang sama diterima, gunakan hasil itu dan jangan panggil web_search lagi kecuali pengguna mengajukan pertanyaan lanjutan yang membutuhkan informasi berbeda.");
+    cJSON *params = cJSON_AddObjectToObject(decl, "parameters");
+    cJSON_AddStringToObject(params, "type", "OBJECT");
+    cJSON *props = cJSON_AddObjectToObject(params, "properties");
+    cJSON *query = cJSON_AddObjectToObject(props, "query");
+    cJSON_AddStringToObject(query, "type", "STRING");
+    cJSON_AddStringToObject(query, "description", "Kata kunci pencarian web yang ringkas dan spesifik.");
+    cJSON *required = cJSON_AddArrayToObject(params, "required");
+    cJSON_AddItemToArray(required, cJSON_CreateString("query"));
+    cJSON_AddItemToArray(decls, decl);
+}
+
 bool build_gemini_setup(char **output, size_t *output_len)
 {
     if (!output || !output_len) return false;
@@ -249,7 +279,9 @@ bool build_gemini_setup(char **output, size_t *output_len)
     "Jangan membuat atau menggunakan command on/off berbasis status. Jangan mengarang command. "
     "Tunggu hasil fungsi sebelum menyatakan tombol berhasil ditekan. "
     "Jangan pernah mengucapkan nama command UART kepada pengguna. "
-    "Memori jangka panjang hanya boleh diubah jika transkrip pengguna menunjukkan permintaan eksplisit. Untuk menyimpan, pahami ungkapan alami bahasa Indonesia seperti \"catat ini\", \"tolong catat\", \"ingat bahwa\", \"tolong ingat\", \"jangan sampai lupa\", \"simpan ini\", \"tolong simpan\", \"masukkan ke memori\", atau \"jadikan catatan\"; frasa tidak harus persis sama. Jangan menyimpan jika pengguna melarang atau membatalkan pencatatan, dan jangan menganggap percakapan biasa sebagai izin. Untuk menghapus, tetap wajib ada frasa persis \"hapus catatan\". Untuk pencatatan, jangan meminta format, key, atau value. Tentukan key pendek dan stabil berdasarkan topik, dan value berisi fakta lengkap dalam bahasa Indonesia dengan detail penting dipertahankan. Contoh: \"catat ini nama anjing saya Boby\" disimpan sebagai key \"Nama Anjing\" dan value \"Nama anjing saya Boby\". Jangan menebak fakta yang tidak diucapkan. Saat menghapus, identifikasi satu kalimat target berdasarkan frasa unik dari catatan; jika ada beberapa kecocokan atau maksud tidak jelas, jangan hapus dan tanyakan klarifikasi. Penghapusan satu kalimat harus mempertahankan kalimat lain. Jangan pernah menyimpan percakapan biasa, dugaan, atau fakta yang tidak diminta. Untuk permintaan seperti coba lihat catatan, bacakan catatan, atau apa saja catatanku, panggil memory_read lalu bacakan isi hasilnya melalui suara. Jika kosong, katakan belum ada catatan tersimpan. Membaca tidak mengubah memori. Catatan jangka panjang adalah pengetahuan kontekstual utama tentang fakta, preferensi, keputusan, dan instruksi pengguna yang memang pernah disimpan. Sebelum menjawab setiap pertanyaan atau mengambil keputusan, periksa apakah catatan yang tersedia relevan dan gunakan sebagai dasar jawaban bila relevan; jangan mengabaikan catatan hanya karena pengguna tidak menyebutnya lagi. Jika informasi yang dibutuhkan mungkin ada di catatan tetapi belum tersedia dalam konteks aktif, panggil memory_read sebelum menjawab. Gunakan hasilnya secara internal dan alami, tanpa perlu selalu mengatakan bahwa kamu sedang membaca catatan. Jangan meminta pengguna mengulang informasi yang sudah tersedia dalam catatan. Jika catatan bertentangan dengan koreksi terbaru yang jelas dari pengguna, utamakan koreksi terbaru; jika tidak yakin atau catatan tidak cukup, tanyakan seperlunya dan jangan mengarang. Catatan adalah konteks yang membantu, bukan alasan untuk mengasumsikan hal yang tidak tercatat. Membaca dan menggunakan catatan untuk menjawab tidak memerlukan frasa izin penyimpanan. Frasa kunci harus berasal dari transkrip pengguna, bukan ucapan Gemini. Setelah memory_save mengembalikan hasil, wajib beri konfirmasi suara dalam bahasa Indonesia: jika hasil menyatakan berhasil, katakan catatan berhasil disimpan; jika gagal atau ditolak, katakan gagal atau tidak dilakukan. Setelah memory_delete mengembalikan hasil, wajib beri konfirmasi suara: jika hasil menyatakan berhasil, katakan catatan berhasil dihapus; jika catatan tidak ditemukan atau terjadi kegagalan, jelaskan bahwa catatan tidak ditemukan atau penghapusan gagal. Jangan hanya memanggil tool tanpa respons suara. Jangan menyatakan berhasil sebelum membaca hasil tool.");
+    "Memori jangka panjang hanya boleh diubah jika transkrip pengguna menunjukkan permintaan eksplisit. Untuk menyimpan, pahami ungkapan alami bahasa Indonesia seperti \"catat ini\", \"tolong catat\", \"ingat bahwa\", \"tolong ingat\", \"jangan sampai lupa\", \"simpan ini\", \"tolong simpan\", \"masukkan ke memori\", atau \"jadikan catatan\"; frasa tidak harus persis sama. Jangan menyimpan jika pengguna melarang atau membatalkan pencatatan, dan jangan menganggap percakapan biasa sebagai izin. Untuk menghapus, tetap wajib ada frasa persis \"hapus catatan\". Untuk pencatatan, jangan meminta format, key, atau value. Tentukan key pendek dan stabil berdasarkan topik, dan value berisi fakta lengkap dalam bahasa Indonesia dengan detail penting dipertahankan. Contoh: \"catat ini nama anjing saya Boby\" disimpan sebagai key \"Nama Anjing\" dan value \"Nama anjing saya Boby\". Jangan menebak fakta yang tidak diucapkan. Saat menghapus, identifikasi satu kalimat target berdasarkan frasa unik dari catatan; jika ada beberapa kecocokan atau maksud tidak jelas, jangan hapus dan tanyakan klarifikasi. Penghapusan satu kalimat harus mempertahankan kalimat lain. Jangan pernah menyimpan percakapan biasa, dugaan, atau fakta yang tidak diminta. Untuk permintaan seperti coba lihat catatan, bacakan catatan, atau apa saja catatanku, panggil memory_read lalu bacakan isi hasilnya melalui suara. Jika kosong, katakan belum ada catatan tersimpan. Membaca tidak mengubah memori. Catatan jangka panjang adalah pengetahuan kontekstual utama tentang fakta, preferensi, keputusan, dan instruksi pengguna yang memang pernah disimpan. Sebelum menjawab setiap pertanyaan atau mengambil keputusan, periksa apakah catatan yang tersedia relevan dan gunakan sebagai dasar jawaban bila relevan; jangan mengabaikan catatan hanya karena pengguna tidak menyebutnya lagi. Jika informasi yang dibutuhkan mungkin ada di catatan tetapi belum tersedia dalam konteks aktif, panggil memory_read sebelum menjawab. Gunakan hasilnya secara internal dan alami, tanpa perlu selalu mengatakan bahwa kamu sedang membaca catatan. Jangan meminta pengguna mengulang informasi yang sudah tersedia dalam catatan. Jika catatan bertentangan dengan koreksi terbaru yang jelas dari pengguna, utamakan koreksi terbaru; jika tidak yakin atau catatan tidak cukup, tanyakan seperlunya dan jangan mengarang. Catatan adalah konteks yang membantu, bukan alasan untuk mengasumsikan hal yang tidak tercatat. Membaca dan menggunakan catatan untuk menjawab tidak memerlukan frasa izin penyimpanan. Frasa kunci harus berasal dari transkrip pengguna, bukan ucapan Gemini. Setelah memory_save mengembalikan hasil, wajib beri konfirmasi suara dalam bahasa Indonesia: jika hasil menyatakan berhasil, katakan catatan berhasil disimpan; jika gagal atau ditolak, katakan gagal atau tidak dilakukan. Setelah memory_delete mengembalikan hasil, wajib beri konfirmasi suara: jika hasil menyatakan berhasil, katakan catatan berhasil dihapus; jika catatan tidak ditemukan atau terjadi kegagalan, jelaskan bahwa catatan tidak ditemukan atau penghapusan gagal. Jangan hanya memanggil tool tanpa respons suara. Jangan menyatakan berhasil sebelum membaca hasil tool. "
+    "Untuk pertanyaan tentang informasi terbaru, harga, perbandingan produk/toko, berita, atau fakta yang perlu diverifikasi, panggil web_search sebelum menjawab. Setelah hasil tool diterima, gunakan judul, URL sumber, dan cuplikan yang benar-benar diberikan. Jika ada satu atau lebih hasil yang relevan, rangkum informasi yang didukung hasil tersebut terlebih dahulu; jangan mengatakan tidak menemukan informasi hanya karena cuplikan tidak memuat semua detail. Jelaskan secara spesifik detail apa yang belum tersedia, jangan menebak, dan minta pengguna memperjelas hanya jika pertanyaannya ambigu. Sebutkan nama sumber atau domain yang tersedia, dan bacakan URL lengkap hanya jika diminta. Jika hasil pencarian kosong atau tool melaporkan kegagalan, jelaskan bahwa pencarian tidak berhasil; jangan berpura-pura sudah browsing. Untuk permintaan harga/perbandingan, cari dengan kata kunci yang menyertakan model tepat, harga, toko, dan wilayah bila relevan. "
+    "Jangan menyebutkan harga terkini atau membandingkan toko hanya dari pengetahuan internal jika pengguna meminta pencarian web.");
     cJSON_AddItemToArray(system_parts, system_text);
 
     cJSON *memory_part = cJSON_CreateObject();
@@ -279,6 +311,7 @@ bool build_gemini_setup(char **output, size_t *output_len)
     }
     add_device_control_tool(setup);
     add_memory_tools(setup);
+    add_web_search_tool(setup);
 
     cJSON *realtime = cJSON_AddObjectToObject(setup, "realtimeInputConfig");
     cJSON *aad = cJSON_AddObjectToObject(realtime, "automaticActivityDetection");
@@ -516,6 +549,20 @@ static void process_gemini_tool_call(cJSON *tool_call)
             size_t memory_len = ai_memory_get_context(memory_read_context, sizeof(memory_read_context));
             (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
                 memory_len ? memory_read_context : "Belum ada catatan jangka panjang yang tersimpan.");
+            continue;
+        } else if (strcmp(name->valuestring, "web_search") == 0) {
+            cJSON *query = cJSON_GetObjectItem(args, "query");
+            if (!cJSON_IsString(query) || !query->valuestring || !query->valuestring[0]) {
+                (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
+                    "Pencarian gagal: query kosong.");
+            } else {
+                websocket_set_mic_uplink_paused(true);
+                if (!websocket_search_start(id->valuestring, query->valuestring)) {
+                    websocket_set_mic_uplink_paused(false);
+                    (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
+                        "Pencarian web belum bisa dimulai karena memori atau task tidak tersedia. Coba lagi.");
+                }
+            }
             continue;
         } else if (strcmp(name->valuestring, "control_device") == 0) {
             cJSON *command = cJSON_GetObjectItem(args, "command");

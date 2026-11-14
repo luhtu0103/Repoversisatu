@@ -109,6 +109,80 @@ unsigned long buzzerTimer = 0;
 char serial2Buffer[512];
 size_t serial2Pos = 0;
 
+// Hasil pencarian web yang diterima melalui UART (maks. 3000 byte).
+static const size_t WEB_SEARCH_MAX_BYTES = 3000;
+char webSearchResult[WEB_SEARCH_MAX_BYTES + 1] = {};
+size_t webSearchExpected = 0;
+size_t webSearchReceived = 0;
+bool webSearchFrameActive = false;
+bool webSearchComplete = false;
+String webSearchStatus = "Belum ada hasil pencarian";
+
+void prosesFrameWebSearch(const char* line) {
+  if (!line) return;
+
+  if (strncmp(line, "WSRCH|BEGIN|", 12) == 0) {
+    char* end = nullptr;
+    unsigned long total = strtoul(line + 12, &end, 10);
+    if (end == line + 12 || *end != '\0' || total > WEB_SEARCH_MAX_BYTES) {
+      webSearchFrameActive = false;
+      webSearchComplete = false;
+      webSearchStatus = "Frame pencarian tidak valid";
+      return;
+    }
+    memset(webSearchResult, 0, sizeof(webSearchResult));
+    webSearchExpected = (size_t)total;
+    webSearchReceived = 0;
+    webSearchFrameActive = true;
+    webSearchComplete = false;
+    webSearchStatus = "Menerima hasil pencarian...";
+    return;
+  }
+
+  if (strcmp(line, "WSRCH|END") == 0) {
+    webSearchFrameActive = false;
+    webSearchComplete = (webSearchReceived == webSearchExpected);
+    if (webSearchComplete) {
+      // UART frames use byte 0x1E as a safe stand-in for newline.
+      for (size_t i = 0; i < webSearchReceived; ++i) {
+        if ((unsigned char)webSearchResult[i] == 0x1E) webSearchResult[i] = '\n';
+      }
+      webSearchResult[webSearchReceived] = '\0';
+    }
+    webSearchStatus = webSearchComplete
+      ? "Hasil pencarian diterima"
+      : "Hasil pencarian tidak lengkap";
+    statusSistem = webSearchStatus;
+    Serial.printf("WSRCH: %u/%u byte, complete=%d\n",
+                  (unsigned)webSearchReceived, (unsigned)webSearchExpected,
+                  webSearchComplete ? 1 : 0);
+    return;
+  }
+
+  if (strncmp(line, "WSRCH|DATA|", 11) == 0) {
+    if (!webSearchFrameActive) return;
+    const char* offsetText = line + 11;
+    char* end = nullptr;
+    unsigned long offset = strtoul(offsetText, &end, 10);
+    if (end == offsetText || *end != '|') return;
+
+    const char* payload = end + 1;
+    size_t payloadLen = strlen(payload);
+    if (offset != webSearchReceived ||
+        offset > webSearchExpected ||
+        payloadLen > webSearchExpected - offset ||
+        payloadLen > WEB_SEARCH_MAX_BYTES - offset) {
+      webSearchFrameActive = false;
+      webSearchStatus = "Urutan atau ukuran data UART tidak valid";
+      return;
+    }
+
+    memcpy(webSearchResult + offset, payload, payloadLen);
+    webSearchReceived += payloadLen;
+    webSearchResult[webSearchReceived] = '\0';
+  }
+}
+
 // RIWAYAT PERCAKAPAN ROBOT
 static const uint8_t HISTORY_MAX_ENTRIES = 24;
 struct HistoryEntry { uint32_t timestamp; char role; char text[420]; };
@@ -366,7 +440,11 @@ void prosesSerial2() {
     if (c == '\n') {
       serial2Buffer[serial2Pos] = '\0';
       if (serial2Pos > 0) {
-        eksekusiTeksPerintah(String(serial2Buffer));
+        if (strncmp(serial2Buffer, "WSRCH|", 6) == 0) {
+          prosesFrameWebSearch(serial2Buffer);
+        } else {
+          eksekusiTeksPerintah(String(serial2Buffer));
+        }
       }
       serial2Pos = 0;
       continue;
@@ -494,7 +572,8 @@ String halamanWeb() {
   h += "document.getElementById('lcd_panel').innerHTML=d;});},3000);</script>";
   h += "</head><body><div class='remote'>";
   h += "<h3>OTAK WEB PEMANCAR</h3>";
-  h += "<a href='/history' style='display:block;background:#2563eb;color:white;padding:12px;border-radius:10px;text-decoration:none;margin:10px 0 18px'>RIWAYAT PERCAKAPAN ROBOT</a>";
+  h += "<a href='/history' style='display:block;background:#2563eb;color:white;padding:12px;border-radius:10px;text-decoration:none;margin:10px 0 8px'>RIWAYAT PERCAKAPAN ROBOT</a>";
+  h += "<a href='/search' style='display:block;background:#047857;color:white;padding:12px;border-radius:10px;text-decoration:none;margin:8px 0 18px'>HASIL PENCARIAN WEB</a>";
 
   String txtLdr = (analogRead(PIN_LDR) > 100) ? "MENYALA" : "MATI";
 
@@ -610,6 +689,31 @@ void handleUpdateData() {
   response += "<br>LAMPU: " + txtLdr;
   response += "<br>STAT : " + statusSistem;
   server.send(200, "text/plain", response);
+}
+
+void handleWebSearchPage() {
+  String h = "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>";
+  h += "<title>Hasil Pencarian Web</title><style>";
+  h += "body{margin:0;padding:16px;background:#111318;color:#e7e9ef;font:16px Arial,sans-serif}";
+  h += ".wrap{max-width:850px;margin:auto}.panel{background:#20232b;border:1px solid #343844;border-radius:12px;padding:16px;margin:12px 0}";
+  h += "pre{white-space:pre-wrap;overflow-wrap:anywhere;font:14px/1.6 monospace;margin:0}";
+  h += "a{display:inline-block;color:#fff;background:#343844;padding:11px 14px;border-radius:8px;text-decoration:none}";
+  h += ".status{color:#6ee7b7;font-size:13px;margin-bottom:12px}</style></head><body><div class='wrap'>";
+  h += "<a href='/'>← Kembali</a><h2>Hasil Pencarian Web</h2>";
+  h += "<div class='panel'><div class='status' id='state'>Menunggu data UART...</div><pre id='result'>Belum ada hasil pencarian.</pre></div>";
+  h += "<script>async function refresh(){try{let s=await fetch('/search_status');document.getElementById('state').textContent=await s.text();let r=await fetch('/search_data');let t=await r.text();document.getElementById('result').textContent=t||'Belum ada hasil pencarian.';}catch(e){document.getElementById('state').textContent='Gagal mengambil data';}}refresh();setInterval(refresh,1000);</script>";
+  h += "</div></body></html>";
+  server.send(200, "text/html; charset=utf-8", h);
+}
+
+void handleWebSearchData() {
+  server.send(200, "text/plain; charset=utf-8", webSearchResult);
+}
+
+void handleWebSearchStatus() {
+  String status = webSearchStatus + " (" + String(webSearchReceived) + "/" +
+                  String(webSearchExpected) + " byte)";
+  server.send(200, "text/plain; charset=utf-8", status);
 }
 
 void handleKirim() {
@@ -780,6 +884,9 @@ void setup() {
   historyLoad();
 
   server.on("/history", handleHistory);
+  server.on("/search", handleWebSearchPage);
+  server.on("/search_data", handleWebSearchData);
+  server.on("/search_status", handleWebSearchStatus);
   server.on("/", []() { server.send(200, "text/html", halamanWeb()); });
   server.on("/update_data", handleUpdateData);
   server.on("/k", handleKirim);

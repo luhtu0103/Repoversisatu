@@ -44,6 +44,17 @@ uint64_t audio_bytes_playback_dropped = 0;
 static volatile bool ws_started = false;
 QueueHandle_t websocket_tx_queue = NULL;
 TaskHandle_t websocket_tx_task_handle = NULL;
+static volatile bool websocket_tx_backpressured = false;
+
+bool websocket_is_backpressured(void)
+{
+    return __atomic_load_n(&websocket_tx_backpressured, __ATOMIC_RELAXED);
+}
+
+void websocket_set_backpressured(bool active)
+{
+    __atomic_store_n(&websocket_tx_backpressured, active, __ATOMIC_RELAXED);
+}
 QueueHandle_t websocket_rx_queue = NULL;
 TaskHandle_t websocket_rx_task_handle = NULL;
 static TaskHandle_t websocket_cleanup_task_handle = NULL;
@@ -76,6 +87,7 @@ void websocket_tx_flush_queue(void)
         if (stale.data) free(stale.data);
         flushed++;
     }
+    websocket_set_backpressured(false);
     if (flushed) ESP_LOGW(TAG, "TX queue dibersihkan: %u command", (unsigned)flushed);
 }
 
@@ -182,6 +194,9 @@ static void websocket_tx_task(void *arg)
     ESP_LOGI(TAG, "WebSocket TX worker dimulai - V7.0.32");
     for (;;) {
         if (xQueueReceive(websocket_tx_queue, &cmd, portMAX_DELAY) != pdTRUE) continue;
+        /* Clear the hard-pause only after the queue has drained below half. */
+        if (uxQueueMessagesWaiting(websocket_tx_queue) < (WS_TX_QUEUE_LENGTH / 2U))
+            websocket_set_backpressured(false);
         uint8_t *audio_data = cmd.data;
         cmd.data = NULL;
         if (cmd.generation != websocket_connection_generation || !is_connected || websocket_tx_error || !client) { free(audio_data); continue; }
@@ -333,6 +348,7 @@ bool websocket_tx_init(void)
         if (!websocket_client_api_mutex) return false;
     }
     if (!websocket_tx_queue) {
+        websocket_set_backpressured(false);
         websocket_tx_queue = xQueueCreate(WS_TX_QUEUE_LENGTH, sizeof(ws_tx_command_t));
         if (!websocket_tx_queue) return false;
     }
@@ -376,6 +392,9 @@ bool websocket_tx_enqueue_audio(const uint8_t *data, size_t len, uint32_t genera
     /* Preserve queued PCM on backpressure. The caller retains and retries this
      * frame when enqueue fails, instead of silently evicting older audio. */
     if (xQueueSend(websocket_tx_queue, &cmd, 0) != pdTRUE) {
+        websocket_set_backpressured(true);
+        ESP_LOGW(TAG, "TX queue penuh; hard pause mic aktif queue=%u capacity=%u",
+                 (unsigned)uxQueueMessagesWaiting(websocket_tx_queue), (unsigned)WS_TX_QUEUE_LENGTH);
         free(copy);
         if (result) *result = WS_TX_ENQUEUE_QUEUE_FULL;
         return false;
@@ -388,7 +407,13 @@ void websocket_schedule_setup(uint32_t generation)
     if (!websocket_tx_queue || !is_connected || websocket_tx_error || generation != websocket_connection_generation) return;
     ws_tx_command_t cmd = {};
     cmd.type = WS_TX_COMMAND_SETUP; cmd.generation = generation;
-    if (xQueueSend(websocket_tx_queue, &cmd, pdMS_TO_TICKS(1000)) == pdTRUE) ESP_LOGI(TAG, "Setup Gemini dijadwalkan melalui TX worker: generation=%lu", (unsigned long)generation);
+    if (xQueueSend(websocket_tx_queue, &cmd, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        ESP_LOGI(TAG, "Setup Gemini dijadwalkan melalui TX worker: generation=%lu", (unsigned long)generation);
+    } else {
+        websocket_set_backpressured(true);
+        ESP_LOGW(TAG, "Setup TX tidak masuk antrean; hard pause mic aktif queue=%u",
+                 (unsigned)uxQueueMessagesWaiting(websocket_tx_queue));
+    }
 }
 
 void websocket_app_start(void)
@@ -472,15 +497,25 @@ void websocket_request_resume_reconnect(void)
         return;
     }
     if (websocket_start_pending) return; /* one reconnect attempt per disconnect */
-    if (!client || !session_resumable || session_handle[0] == '\0') {
-        ESP_LOGW(TAG, "Resume reconnect tidak tersedia: client/handle tidak valid");
+    if (!client) {
+        ESP_LOGW(TAG, "Reconnect tidak dijadwalkan: client sudah NULL");
         return;
     }
+
     websocket_start_pending = true;
-    ESP_LOGW(TAG, "Koneksi terputus/GOAWAY: jadwalkan reconnect dengan handle sesi Gemini");
+    if (session_resumable && session_handle[0] != '\0') {
+        ESP_LOGW(TAG, "Koneksi terputus/GOAWAY: reconnect dengan handle sesi Gemini");
+    } else {
+        /*
+         * A transport reset can happen before Gemini provides a resumable handle.
+         * Do not leave the device permanently disconnected: destroy the old client,
+         * clear stale turn/session state, then start a clean Gemini session.
+         */
+        websocket_fresh_session_reset_pending = true;
+        ESP_LOGW(TAG, "Handle resumption tidak tersedia: reconnect memakai sesi Gemini baru");
+    }
     websocket_disconnect();
 }
-
 bool websocket_take_standby_request(void)
 {
     bool requested = websocket_standby_request;
