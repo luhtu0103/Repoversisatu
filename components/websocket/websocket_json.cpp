@@ -226,7 +226,7 @@ static void add_web_search_tool(cJSON *setup)
     /* Search must finish before Gemini continues with an answer based on unverified facts. */
     cJSON_AddStringToObject(decl, "behavior", "BLOCKING");
     cJSON_AddStringToObject(decl, "description",
-        "Cari informasi terkini di web saat pengguna bertanya tentang berita, fakta yang perlu diverifikasi, atau informasi yang mungkin berubah. Gunakan pencarian ini sebelum menjawab pertanyaan web. Layanan pencarian terpisah ini gratis dan hasilnya dapat terbatas. Jangan mengklaim sudah mencari jika tool gagal. Query harus ringkas dan spesifik.");
+        "Cari informasi terkini di web saat pengguna bertanya tentang berita, fakta yang perlu diverifikasi, atau informasi yang mungkin berubah. Gunakan pencarian ini sebelum menjawab pertanyaan web. Layanan pencarian terpisah ini gratis dan hasilnya dapat terbatas. Jangan mengklaim sudah mencari jika tool gagal. Query harus ringkas dan spesifik. Setelah hasil pencarian untuk pertanyaan yang sama diterima, gunakan hasil itu dan jangan panggil web_search lagi kecuali pengguna mengajukan pertanyaan lanjutan yang membutuhkan informasi berbeda.");
     cJSON *params = cJSON_AddObjectToObject(decl, "parameters");
     cJSON_AddStringToObject(params, "type", "OBJECT");
     cJSON *props = cJSON_AddObjectToObject(params, "properties");
