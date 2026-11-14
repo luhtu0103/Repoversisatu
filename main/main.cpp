@@ -428,7 +428,6 @@ static void audio_task(void *arg)
                     while (gpio_get_level(BOOT_BUTTON_GPIO) == 0) vTaskDelay(pdMS_TO_TICKS(10));
                     ESP_LOGI(TAG, "Tombol ditekan! Memulai sesi...");
                     assistant_active = true;
-                    connect_start_us = esp_timer_get_time();
                     face_set_state(FACE_THINKING);
                     websocket_app_start();
                 }
