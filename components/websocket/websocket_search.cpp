@@ -22,10 +22,28 @@ typedef struct {
 } search_job_t;
 
 typedef struct {
-    char data[SEARCH_HTTP_MAX + 1];
+    char *data;  // Large response buffer is allocated from PSRAM.
     size_t used;
     bool truncated;
 } search_http_buffer_t;
+
+static void reset_search_body(search_http_buffer_t *body)
+{
+    if (!body) return;
+    body->used = 0;
+    body->truncated = false;
+    if (body->data) body->data[0] = '\0';
+}
+
+static void set_search_headers(esp_http_client_handle_t http)
+{
+    esp_http_client_set_header(http, "User-Agent",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    esp_http_client_set_header(http, "Accept",
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8");
+    esp_http_client_set_header(http, "Accept-Language", "en-US,en;q=0.5");
+    esp_http_client_set_header(http, "Connection", "keep-alive");
+}
 
 static esp_err_t search_http_event(esp_http_client_event_t *evt)
 {
@@ -218,7 +236,7 @@ static unsigned parse_ddg_results(const char *html, char *out, size_t cap)
 static bool try_search_endpoint(const char *url, search_http_buffer_t *body,
                                 char *result, size_t result_cap, int *status_out)
 {
-    memset(body, 0, sizeof(*body));
+    reset_search_body(body);
     result[0] = '\0';
 
     esp_http_client_config_t cfg = {};
@@ -239,10 +257,7 @@ static bool try_search_endpoint(const char *url, search_http_buffer_t *body,
         return false;
     }
 
-    esp_http_client_set_header(http, "User-Agent",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36");
-    esp_http_client_set_header(http, "Accept", "text/html,application/xhtml+xml");
-    esp_http_client_set_header(http, "Accept-Language", "id-ID,id;q=0.9,en;q=0.8");
+    set_search_headers(http);
 
     esp_err_t err = esp_http_client_perform(http);
     int status = esp_http_client_get_status_code(http);
@@ -281,6 +296,14 @@ static void web_search_task(void *arg)
     char encoded[SEARCH_QUERY_MAX * 3 + 1] = {0};
     char result[SEARCH_RESULT_MAX] = {0};
     search_http_buffer_t *body = (search_http_buffer_t *)calloc(1, sizeof(search_http_buffer_t));
+    if (body) {
+        body->data = (char *)heap_caps_malloc(SEARCH_HTTP_MAX + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!body->data) {
+            ESP_LOGE(TAG, "Buffer respons %u byte gagal dialokasikan di PSRAM", (unsigned)(SEARCH_HTTP_MAX + 1));
+            free(body);
+            body = NULL;
+        }
+    }
     bool ok = body && url_encode(job->query, encoded, sizeof(encoded));
     if (ok) {
         /* DuckDuckGo can return HTTP 202 challenge pages intermittently.
@@ -298,7 +321,7 @@ static void web_search_task(void *arg)
         for (size_t attempt = 0; attempt < endpoint_count * 2; ++attempt) {
             if (attempt > 0) vTaskDelay(pdMS_TO_TICKS(400));
             const size_t endpoint_index = attempt % endpoint_count;
-            memset(body, 0, sizeof(*body));
+            reset_search_body(body);
             result[0] = '\0';
             char url[1024];
             snprintf(url, sizeof(url), endpoints[endpoint_index], encoded);
@@ -321,9 +344,7 @@ static void web_search_task(void *arg)
                 continue;
             }
 
-            esp_http_client_set_header(http, "User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36");
-            esp_http_client_set_header(http, "Accept", "text/html,application/xhtml+xml");
-            esp_http_client_set_header(http, "Accept-Language", "id-ID,id;q=0.9,en;q=0.8");
+            set_search_headers(http);
             last_err = esp_http_client_perform(http);
             last_status = esp_http_client_get_status_code(http);
 
@@ -342,6 +363,11 @@ static void web_search_task(void *arg)
                 ESP_LOGW(TAG, "HTTP 200 tetapi format hasil tidak dikenali; endpoint=%u prefix=%.*s",
                          (unsigned)attempt + 1, 100, body->data);
             } else {
+                if (last_status == 202 && body->data) {
+                    ESP_LOGW(TAG, "HTTP 202 challenge candidate endpoint=%u body=%u prefix=%.*s",
+                             (unsigned)attempt + 1, (unsigned)body->used,
+                             (int)(body->used > 500 ? 500 : body->used), body->data);
+                }
                 ESP_LOGW(TAG, "Endpoint pencarian %u gagal: HTTP=%d err=%s body=%u",
                          (unsigned)attempt + 1, last_status, esp_err_to_name(last_err),
                          (unsigned)body->used);
@@ -357,7 +383,10 @@ static void web_search_task(void *arg)
     } else {
         snprintf(result, sizeof(result), "Pencarian web gagal: memori tidak cukup atau query terlalu panjang.");
     }
-    if (body) free(body);
+    if (body) {
+        if (body->data) heap_caps_free(body->data);
+        free(body);
+    }
     uart_control_send_web_search(result);
     if (!websocket_send_tool_response_text(job->id, "web_search", result)) {
         ESP_LOGW(TAG, "Hasil pencarian tidak terkirim ke Gemini (id=%s); mic uplink dibuka agar sesi tidak terkunci", job->id);
