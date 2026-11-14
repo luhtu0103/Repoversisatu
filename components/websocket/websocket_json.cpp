@@ -555,9 +555,13 @@ static void process_gemini_tool_call(cJSON *tool_call)
             if (!cJSON_IsString(query) || !query->valuestring || !query->valuestring[0]) {
                 (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
                     "Pencarian gagal: query kosong.");
-            } else if (!websocket_search_start(id->valuestring, query->valuestring)) {
-                (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
-                    "Pencarian web belum bisa dimulai karena memori atau task tidak tersedia. Coba lagi.");
+            } else {
+                websocket_set_mic_uplink_paused(true);
+                if (!websocket_search_start(id->valuestring, query->valuestring)) {
+                    websocket_set_mic_uplink_paused(false);
+                    (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
+                        "Pencarian web belum bisa dimulai karena memori atau task tidak tersedia. Coba lagi.");
+                }
             }
             continue;
         } else if (strcmp(name->valuestring, "control_device") == 0) {
