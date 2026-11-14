@@ -114,6 +114,7 @@ static void audio_playback_task(void *arg)
             } else if (audio_stream != NULL) xStreamBufferReset(audio_stream);
             audio_turn_complete_pending = false;
             audio_turn_active = false;
+            websocket_set_mic_uplink_paused(false);
             audio_hal_set_mic_enabled(true);
             playback_started = false;
             playback_started_once = false;
