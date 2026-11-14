@@ -78,6 +78,46 @@ void uart_control_send_history(const char *role, const char *text)
     line[pos] = '\0';
     if (pos > 6) uart_control_send(line);
 }
+/* Send web-search text to the secondary DevKit using a framed UART protocol.
+ * Frame lines:
+ *   WSRCH|BEGIN|<total_bytes>\n
+ *   WSRCH|DATA|<byte_offset>|<payload_chunk>\n
+ *   WSRCH|END\n
+ * Payload newlines are normalized to spaces; offsets refer to payload bytes.
+ */
+void uart_control_send_web_search(const char *text)
+{
+    if (!text || !text[0]) return;
+
+    size_t total = 0;
+    for (const unsigned char *p = (const unsigned char *)text; *p; ++p) ++total;
+
+    char header[48];
+    int hn = snprintf(header, sizeof(header), "WSRCH|BEGIN|%u\\n", (unsigned)total);
+    if (hn <= 0 || (size_t)hn >= sizeof(header)) return;
+    uart_write_bytes(UART_CONTROL_NUM, header, hn);
+
+    const unsigned char *p = (const unsigned char *)text;
+    size_t offset = 0;
+    while (*p) {
+        char chunk[321];
+        size_t n = 0;
+        while (*p && n < 320) {
+            unsigned char c = *p++;
+            chunk[n++] = (c == '\\r' || c == '\\n') ? ' ' : (char)c;
+        }
+        char prefix[48];
+        int pn = snprintf(prefix, sizeof(prefix), "WSRCH|DATA|%u|", (unsigned)offset);
+        if (pn <= 0 || (size_t)pn >= sizeof(prefix)) return;
+        uart_write_bytes(UART_CONTROL_NUM, prefix, pn);
+        uart_write_bytes(UART_CONTROL_NUM, chunk, n);
+        uart_write_bytes(UART_CONTROL_NUM, "\\n", 1);
+        offset += n;
+    }
+    uart_write_bytes(UART_CONTROL_NUM, "WSRCH|END\\n", 11);
+    ESP_LOGI(TAG, "Hasil pencarian dikirim ke UART: %u byte", (unsigned)total);
+}
+
 bool uart_control_execute_sensor_command(const char *command, char *response, size_t response_len, uint32_t timeout_ms)
 {
     if (response && response_len > 0) response[0] = '\0';

@@ -1,4 +1,5 @@
 #include "websocket_internal.h"
+#include "uart_control.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_log.h"
@@ -207,6 +208,7 @@ static void web_search_task(void *arg)
     }
 
     if (body) free(body);
+    uart_control_send_web_search(result);
     if (!websocket_send_tool_response_text(job->id, "web_search", result))
         ESP_LOGW(TAG, "Hasil pencarian tidak terkirim ke Gemini (id=%s)", job->id);
     else
