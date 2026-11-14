@@ -322,6 +322,14 @@ static void audio_task(void *arg)
             vTaskDelay(1);
             continue;
         }
+        if (websocket_mic_uplink_paused) {
+            if (bytes_read > 0) mic_buffer_lost_bytes += bytes_read;
+            buffer_pos = 0; // Never buffer/replay speech captured during a web search.
+            tx_backpressure_start_us = 0;
+            consecutive_tx_enqueue_failures = 0;
+            vTaskDelay(1);
+            continue;
+        }
         if (mic_buffer_full) {
             if (bytes_read > 0) mic_buffer_lost_bytes += bytes_read;
             int64_t now_us = esp_timer_get_time();
