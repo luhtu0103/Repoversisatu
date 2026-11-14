@@ -71,10 +71,11 @@ static bool send_tool_payload(const char *id, const char *name, const char *resu
     cmd.generation = websocket_connection_generation;
     cmd.len = (uint16_t)len;
     cmd.data = copy;
-    if (xQueueSend(websocket_tx_queue, &cmd, 0) != pdTRUE) {
+    /* Let queued microphone frames drain instead of losing a tool response when TX is full. */
+    if (xQueueSend(websocket_tx_queue, &cmd, pdMS_TO_TICKS(3000)) != pdTRUE) {
         free(copy);
         cJSON_free(payload);
-        ESP_LOGW(TAG, "TX queue penuh; tool response ditahan: %s", name);
+        ESP_LOGW(TAG, "TX queue tetap penuh setelah 3 detik; tool response gagal antre: %s", name);
         return false;
     }
     ESP_LOGI(TAG, "Tool response masuk antrean TX: %s id=%s", name, id);
