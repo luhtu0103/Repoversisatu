@@ -6,6 +6,7 @@
 #include "ai_memory.h"
 #include "servo_head.h"
 
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "mbedtls/base64.h"
@@ -17,9 +18,9 @@
 
 static const char *TAG = "WS_JSON";
 
-/* v7.0.25: fixed PCM decode workspace. */
+/* v7.0.25: fixed PCM decode workspace. Disimpan di PSRAM agar RAM internal hemat. */
 #define PCM_DECODE_WORKSPACE_SIZE (24 * 1024)
-static uint8_t pcm_decode_buffer[PCM_DECODE_WORKSPACE_SIZE];
+static EXT_RAM_BSS_ATTR uint8_t pcm_decode_buffer[PCM_DECODE_WORKSPACE_SIZE];
 
 /* Standby waits for Gemini's acknowledgement turn to finish. */
 static volatile bool standby_after_turn_complete = false;
@@ -285,8 +286,9 @@ bool build_gemini_setup(char **output, size_t *output_len)
     cJSON_AddItemToArray(system_parts, system_text);
 
     cJSON *memory_part = cJSON_CreateObject();
-    /* Keep large context buffers off the ws_tx task stack to prevent overflow. */
-    static char memory_context[4096] = {};
+    /* Keep large context buffers off the ws_tx task stack to prevent overflow.
+     * memory_context disimpan di PSRAM untuk menghemat RAM internal. */
+    static EXT_RAM_BSS_ATTR char memory_context[4096];
     static char memory_prompt[4352];
     size_t memory_len = ai_memory_get_context(memory_context, sizeof(memory_context));
     if (memory_part && memory_len > 0) {
@@ -372,8 +374,8 @@ static cJSON *parse_json_with_diagnostics(const char *json, size_t len)
 static char latest_user_transcript[768];
 static bool pending_explicit_memory_save = false;
 static bool pending_explicit_memory_delete = false;
-/* Keep memory-read workspace off the WebSocket RX task stack. */
-static char memory_read_context[4096];
+/* Keep memory-read workspace off the WebSocket RX task stack (disimpan di PSRAM). */
+static EXT_RAM_BSS_ATTR char memory_read_context[4096];
 
 static bool transcript_has_any(const char *text, const char *const *needles, size_t count)
 {
