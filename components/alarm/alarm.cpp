@@ -1,5 +1,6 @@
 #include "alarm.h"
 #include "nvs.h"
+#include "freertos/FreeRTOS.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include <time.h>
@@ -132,7 +133,7 @@ bool alarm_take_due(alarm_info_t *info)
 }
 
 /* Called frequently from the existing audio task; no extra FreeRTOS task needed. */
-extern "C" bool alarm_poll_due_internal(void)
+bool alarm_poll_due_internal(void)
 {
     const time_t now = time(NULL);
     bool fired = false;
