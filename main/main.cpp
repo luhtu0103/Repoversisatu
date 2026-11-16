@@ -518,7 +518,7 @@ static void audio_task(void *arg)
         if (!assistant_active) {
             portENTER_CRITICAL(&speaker_context_mux);
             speaker_context_pending = false;  // sesi lama selesai; jangan bawa nama ke sesi berikutnya
-            speaker_session_seq++;            // hasil worker yang terlambat jadi basi
+            speaker_session_seq = speaker_session_seq + 1;  // hasil worker yang terlambat jadi basi
             portEXIT_CRITICAL(&speaker_context_mux);
             // Wait for the previous WebSocket client to be destroyed before
             // detecting another wake word and starting a fresh Gemini session.
