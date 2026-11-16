@@ -116,6 +116,47 @@ bool websocket_send_touch_prompt(bool angry)
     return true;
 }
 
+bool websocket_send_alarm_prompt(int hour, int minute, const char *label)
+{
+    if (!label || !label[0] || hour < 0 || hour > 23 || minute < 0 || minute > 59) return false;
+    if (!websocket_is_connected() || !websocket_tx_queue) return false;
+
+    char safe[96];
+    size_t j = 0;
+    for (const unsigned char *p = (const unsigned char *)label; *p && j + 1 < sizeof(safe); ++p) {
+        if (*p < 0x20 || *p == 0x7F) continue;
+        if (*p == '"' || *p == '\\') safe[j++] = '\\';
+        safe[j++] = (char)*p;
+    }
+    safe[j] = '\0';
+    char json[768];
+    int n = snprintf(json, sizeof(json),
+        "{\"clientContent\":{\"turns\":[{\"role\":\"user\",\"parts\":[{\"text\":"
+        "\"[Alarm otomatis] Sekarang pukul %02d:%02d WITA. Keterangan alarm: %s. "
+        "Bangunkan pengguna sekarang. Ucapkan satu sapaan hangat dan alami dalam bahasa Indonesia, "
+        "sesuai keterangan alarm. Jangan membacakan instruksi dalam tanda kurung dan jangan bertanya. "
+        "Contoh jika untuk membangunkan: Selamat pagi! Sekarang sudah pukul %02d:%02d. Yuk bangun, "
+        "semangat menjalani aktivitas hari ini! Buat ucapan terasa alami dan tidak harus sama persis.\"}]}],\"turnComplete\":true}}",
+        hour, minute, safe, hour, minute);
+    if (n <= 0 || (size_t)n >= sizeof(json)) return false;
+    uint8_t *copy = (uint8_t *)malloc((size_t)n);
+    if (!copy) return false;
+    memcpy(copy, json, (size_t)n);
+    ws_tx_command_t cmd = {};
+    cmd.type = WS_TX_COMMAND_TEXT;
+    cmd.generation = websocket_connection_generation;
+    cmd.len = (uint16_t)n;
+    cmd.data = copy;
+    if (xQueueSend(websocket_tx_queue, &cmd, 0) != pdTRUE) {
+        websocket_set_backpressured(true);
+        free(copy);
+        ESP_LOGW(TAG, "Alarm prompt ditahan: TX queue penuh");
+        return false;
+    }
+    ESP_LOGI(TAG, "Alarm prompt masuk antrean TX: %02d:%02d WITA (%s)", hour, minute, safe);
+    return true;
+}
+
 bool websocket_send_speaker_context(const char *name)
 {
     if (!name || !name[0]) return false;
