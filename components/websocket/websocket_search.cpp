@@ -15,6 +15,8 @@ static const char *TAG = "WS_SEARCH";
 #define SEARCH_HTTP_MAX 24000
 #define SEARCH_QUERY_MAX 240
 #define SEARCH_RESULT_MAX 3000
+/* TLS handshake + buffer lokal butuh stack besar. 8192 terlalu mepet. */
+#define SEARCH_TASK_STACK 12288
 
 typedef struct {
     char id[96];
@@ -408,7 +410,7 @@ bool websocket_search_start(const char *id, const char *query)
     snprintf(job->id, sizeof(job->id), "%s", id);
     memcpy(job->query, query, qlen);
     job->query[qlen] = '\0';
-    BaseType_t created = xTaskCreate(web_search_task, "web_search", 8192, job, 2, NULL);
+    BaseType_t created = xTaskCreate(web_search_task, "web_search", SEARCH_TASK_STACK, job, 2, NULL);
     if (created != pdPASS) {
         free(job);
         ESP_LOGW(TAG, "Tidak bisa membuat task pencarian");
