@@ -11,6 +11,7 @@
 #include "servo_head.h"
 #include "led_rgb.h"
 #include "speaker_id.h"
+#include "alarm.h"
 
 #include "esp_log.h"
 #include "esp_system.h"
@@ -31,6 +32,7 @@
 #include <time.h>
 
 #include <string.h>
+#include <stdlib.h>
 #include <errno.h>
 #include <netdb.h>
 #include <sys/socket.h>
@@ -196,6 +198,8 @@ static void debug_network_path(void)
 
 static void sync_sntp_time(void)
 {
+    setenv("TZ", "WITA-8", 1);  // WITA = UTC+8, tanpa DST
+    tzset();
     ESP_LOGI(TAG, "Mencari server NTP..."); display_status("Sync Jam Network..");
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL); esp_sntp_setservername(0, "time.google.com"); esp_sntp_setservername(1, "id.pool.ntp.org"); esp_sntp_setservername(2, "pool.ntp.org"); esp_sntp_init();
     int retry = 0; const int max_retries = 10; time_t now = 0; struct tm timeinfo = {};
@@ -208,6 +212,8 @@ static volatile bool led_boot_phase = true;
 static volatile bool led_wifi_config_mode = false;
 static volatile bool mic_voice_detected = false;
 static int64_t disconnect_wait_start_us = 0;
+static bool alarm_prompt_pending = false;
+static alarm_info_t alarm_prompt_info = {};
 
 /* Ring 1,5 detik audio mentah untuk Speaker ID. MFCC+DTW harus berjalan
  * di worker terpisah agar audio_task tetap menguras antrean mikrofon. */
@@ -382,6 +388,28 @@ static void audio_task(void *arg)
     constexpr int64_t STANDBY_PLAYBACK_DRAIN_TIMEOUT_US = 8000000LL;
 
     while (1) {
+        if (alarm_poll_due_internal()) {
+            alarm_info_t fired = {};
+            if (alarm_take_due(&fired)) {
+                alarm_prompt_info = fired;
+                alarm_prompt_pending = true;
+                ESP_LOGW(TAG, "ALARM: waktu %02d:%02d WITA tiba; memulai Gemini otomatis. Keterangan=%s",
+                         fired.hour, fired.minute, fired.label);
+                display_status("Alarm: memulai Gemini");
+                if (!assistant_active && !websocket_lifecycle_busy()) {
+                    assistant_active = true;
+                    disconnect_wait_start_us = 0;
+                    face_set_state(FACE_THINKING);
+                    websocket_app_start();
+                }
+            }
+        }
+        if (alarm_prompt_pending && !assistant_active && !websocket_lifecycle_busy()) {
+            assistant_active = true;
+            disconnect_wait_start_us = 0;
+            face_set_state(FACE_THINKING);
+            websocket_app_start();
+        }
         if (websocket_take_standby_request()) {
             standby_pending = true;
             standby_requested_us = esp_timer_get_time();
@@ -597,6 +625,15 @@ static void audio_task(void *arg)
                 speaker_context_pending = false;
             portEXIT_CRITICAL(&speaker_context_mux);
         }
+        if (alarm_prompt_pending && websocket_is_connected()) {
+            if (websocket_send_alarm_prompt(alarm_prompt_info.hour, alarm_prompt_info.minute,
+                                            alarm_prompt_info.label)) {
+                alarm_prompt_pending = false;
+                standby_pending = true;  // kembali ke standby setelah ucapan alarm selesai diputar
+                standby_requested_us = esp_timer_get_time();
+                ESP_LOGI(TAG, "Prompt alarm terkirim ke Gemini; menunggu audio selesai lalu kembali standby");
+            }
+        }
 
         // Gemini Live receives microphone audio continuously while the speaker is idle.
         // 1280 bytes = 640 samples = 40 ms at 16 kHz mono PCM16. A 40 ms
@@ -716,7 +753,7 @@ extern "C" void app_main()
         esp_restart();
     }
 
-    esp_wifi_set_ps(WIFI_PS_NONE); ESP_LOGI(TAG, "WiFi power save dimatikan"); ESP_LOGI(TAG, "WIFI READY - lanjut ke NTP"); sync_sntp_time(); ESP_LOGI(TAG, "Menunggu 1 detik..."); vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_wifi_set_ps(WIFI_PS_NONE); ESP_LOGI(TAG, "WiFi power save dimatikan"); ESP_LOGI(TAG, "WIFI READY - lanjut ke NTP"); sync_sntp_time(); if (!alarm_init()) ESP_LOGW(TAG, "Alarm NVS belum siap; fitur alarm mungkin belum bisa digunakan"); ESP_LOGI(TAG, "Menunggu 1 detik..."); vTaskDelay(pdMS_TO_TICKS(1000));
     debug_network_path(); vTaskDelay(pdMS_TO_TICKS(1000)); face_set_state(FACE_SLEEP); display_status("Sistem siap. Katakan Hi, ESP...");
 
     BaseType_t task_result = xTaskCreate(audio_task, "audio_task", 10240, NULL, 5, NULL); if (task_result != pdPASS) ESP_LOGE(TAG, "Gagal membuat audio_task!"); else ESP_LOGI(TAG, "audio_task berhasil dimulai.");
