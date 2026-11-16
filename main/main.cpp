@@ -10,6 +10,7 @@
 #include "touch_emotion.h"
 #include "servo_head.h"
 #include "led_rgb.h"
+#include "speaker_id.h"
 
 #include "esp_log.h"
 #include "esp_system.h"
@@ -207,6 +208,38 @@ static volatile bool led_wifi_config_mode = false;
 static volatile bool mic_voice_detected = false;
 static int64_t disconnect_wait_start_us = 0;
 
+/* Pengenal suara: simpan 1,5 detik terakhir audio mentah supaya saat wake word
+ * terdeteksi, kata "Hi ESP" yang barusan diucapkan bisa dibandingkan. */
+constexpr size_t WAKE_RING_SAMPLES = 24000;
+static char speaker_pending_name[SPEAKER_ID_NAME_MAX + 1] = {};
+static bool speaker_context_pending = false;
+
+/* Salin ring buffer (urut dari yang tertua) lalu kenali pembicara. */
+static void identify_speaker_from_ring(const int16_t *ring, size_t ring_pos, size_t ring_filled,
+                                       int16_t *scratch)
+{
+    speaker_context_pending = false;
+    if (!ring || !scratch || !speaker_id_has_profiles() || ring_filled < 8000) return;
+
+    const size_t start = (ring_filled < WAKE_RING_SAMPLES) ? 0 : ring_pos;
+    for (size_t i = 0; i < ring_filled; ++i)
+        scratch[i] = ring[(start + i) % WAKE_RING_SAMPLES];
+
+    speaker_id_result_t result;
+    const speaker_id_status_t st = speaker_id_identify(scratch, ring_filled, &result);
+    if (st != SPEAKER_ID_OK) {
+        ESP_LOGI(TAG, "Pengenal suara dilewati: %s", speaker_id_status_text(st));
+        return;
+    }
+    if (result.known) {
+        strlcpy(speaker_pending_name, result.name, sizeof(speaker_pending_name));
+        speaker_context_pending = true;
+        ESP_LOGI(TAG, "Pembicara dikenal: %s", speaker_pending_name);
+    } else {
+        ESP_LOGI(TAG, "Pembicara tidak dikenal; Gemini tidak diberi nama (tidak disapa)");
+    }
+}
+
 static void led_status_task(void *arg)
 {
     (void)arg;
@@ -266,6 +299,20 @@ static void audio_task(void *arg)
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    /* Ring buffer 1,5 detik audio mentah + ruang salin, untuk pengenal suara. */
+    int16_t *wake_ring = (int16_t *)heap_caps_calloc(
+        WAKE_RING_SAMPLES, sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    int16_t *wake_scratch = (int16_t *)heap_caps_malloc(
+        WAKE_RING_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!wake_ring || !wake_scratch) {
+        ESP_LOGW(TAG, "Ring buffer pengenal suara gagal dialokasikan; sapaan nama dimatikan");
+        heap_caps_free(wake_ring);
+        heap_caps_free(wake_scratch);
+        wake_ring = nullptr;
+        wake_scratch = nullptr;
+    }
+    size_t wake_ring_pos = 0;
+    size_t wake_ring_filled = 0;
     size_t buffer_pos = 0;
     size_t buffer_high_water = 0;
     uint64_t mic_buffer_lost_bytes = 0;
@@ -373,6 +420,7 @@ static void audio_task(void *arg)
         }
 
         if (!assistant_active) {
+            speaker_context_pending = false;  // sesi lama selesai; jangan bawa nama ke sesi berikutnya
             // Wait for the previous WebSocket client to be destroyed before
             // detecting another wake word and starting a fresh Gemini session.
             if (websocket_lifecycle_busy()) {
@@ -402,6 +450,14 @@ static void audio_task(void *arg)
                    buffer_pos >= (size_t)wakeword_get_chunk_samples() * sizeof(int16_t)) {
                 size_t wake_bytes = (size_t)wakeword_get_chunk_samples() * sizeof(int16_t);
                 int16_t *wake_pcm = reinterpret_cast<int16_t *>(audio_buffer);
+                if (wake_ring) {
+                    const size_t chunk = (size_t)wakeword_get_chunk_samples();
+                    for (size_t i = 0; i < chunk; ++i)
+                        wake_ring[(wake_ring_pos + i) % WAKE_RING_SAMPLES] = wake_pcm[i];
+                    wake_ring_pos = (wake_ring_pos + chunk) % WAKE_RING_SAMPLES;
+                    wake_ring_filled += chunk;
+                    if (wake_ring_filled > WAKE_RING_SAMPLES) wake_ring_filled = WAKE_RING_SAMPLES;
+                }
                 detect_calls++;
                 int wake_result = wakeword_detect(wake_pcm);
                 last_wake_result = wake_result;
@@ -413,6 +469,9 @@ static void audio_task(void *arg)
                     disconnect_wait_start_us = 0;
                     face_set_state(FACE_THINKING);
                     websocket_app_start();
+                    /* Koneksi Gemini berjalan di task lain; sambil menunggu, kenali suara. */
+                    identify_speaker_from_ring(wake_ring, wake_ring_pos, wake_ring_filled, wake_scratch);
+                    wake_ring_filled = 0;
                     buffer_pos = 0;
                     vTaskDelay(pdMS_TO_TICKS(10));
                     continue;
@@ -466,6 +525,11 @@ static void audio_task(void *arg)
             continue;
         }
         disconnect_wait_start_us = 0;
+
+        // Suara dikenal: beri tahu Gemini namanya sekali setelah sesi siap.
+        // Suara tidak dikenal: tidak ada yang dikirim, jadi Gemini tidak menyapa.
+        if (speaker_context_pending && websocket_send_speaker_context(speaker_pending_name))
+            speaker_context_pending = false;
 
         // Gemini Live receives microphone audio continuously while the speaker is idle.
         // 1280 bytes = 640 samples = 40 ms at 16 kHz mono PCM16. A 40 ms
@@ -547,6 +611,12 @@ extern "C" void app_main()
         led_wifi_config_mode = true;
         led_boot_phase = false;
         display_status("Config Mode");
+        // Halaman Profil Suara (/voice): perlu mic dan penyimpanan.
+        // Mic dimatikan dulu; hanya dinyalakan sebentar saat merekam.
+        audio_hal_init();
+        audio_hal_set_mic_enabled(false);
+        if (speaker_id_init()) web_config_set_extra_handlers(speaker_id_web_register);
+        else ESP_LOGW(TAG, "speaker_id gagal init; halaman Profil Suara tidak aktif");
         web_config_start();
         while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -556,6 +626,8 @@ extern "C" void app_main()
     // SPIFFS formatting may temporarily stall flash/cache execution; keep OLED2
     // animation tasks unstarted until storage initialization has completed.
     if (!ai_memory_init()) ESP_LOGW(TAG, "Memori lokal belum siap; fitur catatan akan gagal sampai penyimpanan pulih");
+    // Muat profil suara (PSRAM + SPIFFS). Gagal bukan masalah: robot tetap jalan tanpa sapaan nama.
+    if (!speaker_id_init()) ESP_LOGW(TAG, "speaker_id tidak aktif; robot tidak akan menyapa dengan nama");
 
     oled_init(); face_animation_start(); face_set_state(FACE_SLEEP); display_status("Booting...");
     audio_hal_init(); audio_i2s_test_tone();
