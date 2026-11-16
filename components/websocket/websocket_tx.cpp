@@ -115,3 +115,50 @@ bool websocket_send_touch_prompt(bool angry)
     ESP_LOGI(TAG, "Touch prompt masuk antrean TX (%s)", angry ? "MARAH" : "SENANG");
     return true;
 }
+
+bool websocket_send_speaker_context(const char *name)
+{
+    if (!name || !name[0]) return false;
+    if (!websocket_is_connected() || !websocket_tx_queue) {
+        ESP_LOGI(TAG, "Konteks pembicara ditunda: sesi Gemini belum siap");
+        return false;
+    }
+
+    /* Bersihkan nama agar aman dimasukkan ke JSON. */
+    char safe[64];
+    size_t j = 0;
+    for (const unsigned char *p = (const unsigned char *)name; *p && j + 1 < sizeof(safe); ++p) {
+        if (*p >= 0x20 && *p != 0x7F && *p != '"' && *p != '\\') safe[j++] = (char)*p;
+    }
+    safe[j] = '\0';
+    if (j == 0) return false;
+
+    char json[512];
+    int n = snprintf(json, sizeof(json),
+        "{\"clientContent\":{\"turns\":[{\"role\":\"user\",\"parts\":[{\"text\":"
+        "\"[Sistem] Pengenal suara perangkat mengenali pengguna ini sebagai %s. "
+        "Sapa %s dengan ramah memakai namanya, cukup satu kalimat singkat dalam bahasa Indonesia, "
+        "lalu tunggu perintahnya.\"}]}],\"turnComplete\":true}}",
+        safe, safe);
+    if (n <= 0 || (size_t)n >= sizeof(json)) return false;
+
+    uint8_t *copy = (uint8_t *)malloc((size_t)n);
+    if (!copy) {
+        ESP_LOGW(TAG, "Konteks pembicara ditahan: malloc gagal");
+        return false;
+    }
+    memcpy(copy, json, (size_t)n);
+    ws_tx_command_t cmd = {};
+    cmd.type = WS_TX_COMMAND_TEXT;
+    cmd.generation = websocket_connection_generation;
+    cmd.len = (uint16_t)n;
+    cmd.data = copy;
+    if (xQueueSend(websocket_tx_queue, &cmd, 0) != pdTRUE) {
+        websocket_set_backpressured(true);
+        free(copy);
+        ESP_LOGW(TAG, "Konteks pembicara ditahan: TX queue penuh");
+        return false;
+    }
+    ESP_LOGI(TAG, "Konteks pembicara masuk antrean TX: %s", safe);
+    return true;
+}
