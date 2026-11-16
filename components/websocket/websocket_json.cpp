@@ -610,6 +610,43 @@ static void process_gemini_tool_call(cJSON *tool_call)
                 }
             }
             continue;
+        } else if (strcmp(name->valuestring, "alarm_control") == 0) {
+            cJSON *action = cJSON_GetObjectItem(args, "action");
+            if (!cJSON_IsString(action) || !action->valuestring) {
+                (void)websocket_send_tool_response_text(id->valuestring, name->valuestring, "Gagal: aksi alarm tidak valid.");
+                continue;
+            }
+            char detail[256] = {};
+            if (strcmp(action->valuestring, "set") == 0) {
+                cJSON *hour = cJSON_GetObjectItem(args, "hour");
+                cJSON *minute = cJSON_GetObjectItem(args, "minute");
+                cJSON *label = cJSON_GetObjectItem(args, "label");
+                if (!cJSON_IsNumber(hour) || !cJSON_IsNumber(minute) ||
+                    !cJSON_IsString(label) || !label->valuestring || !label->valuestring[0]) {
+                    (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
+                        "Gagal: jam, menit, dan keterangan alarm harus lengkap.");
+                    continue;
+                }
+                success = alarm_set(hour->valueint, minute->valueint, label->valuestring, detail, sizeof(detail));
+            } else if (strcmp(action->valuestring, "cancel") == 0) {
+                success = alarm_cancel(detail, sizeof(detail));
+            } else if (strcmp(action->valuestring, "status") == 0) {
+                alarm_info_t info = {};
+                (void)alarm_get(&info);
+                if (info.active) {
+                    snprintf(detail, sizeof(detail), "Alarm aktif pukul %02d:%02d WITA. Keterangan: %s.",
+                             info.hour, info.minute, info.label);
+                } else {
+                    snprintf(detail, sizeof(detail), "Saat ini tidak ada alarm aktif.");
+                }
+                success = true;
+            } else {
+                snprintf(detail, sizeof(detail), "Gagal: aksi alarm tidak dikenal.");
+            }
+            ESP_LOGI(TAG, "ALARM TOOL action=%s result=%s", action->valuestring, success ? "OK" : "GAGAL");
+            (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
+                detail[0] ? detail : (success ? "Alarm berhasil diproses." : "Alarm gagal diproses."));
+            continue;
         } else if (strcmp(name->valuestring, "control_device") == 0) {
             cJSON *command = cJSON_GetObjectItem(args, "command");
 
