@@ -22,6 +22,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 
 #include "nvs_flash.h"
 #include "esp_sntp.h"
@@ -208,35 +209,77 @@ static volatile bool led_wifi_config_mode = false;
 static volatile bool mic_voice_detected = false;
 static int64_t disconnect_wait_start_us = 0;
 
-/* Pengenal suara: simpan 1,5 detik terakhir audio mentah supaya saat wake word
- * terdeteksi, kata "Hi ESP" yang barusan diucapkan bisa dibandingkan. */
+/* Ring 1,5 detik audio mentah untuk Speaker ID. MFCC+DTW harus berjalan
+ * di worker terpisah agar audio_task tetap menguras antrean mikrofon. */
 constexpr size_t WAKE_RING_SAMPLES = 24000;
 static char speaker_pending_name[SPEAKER_ID_NAME_MAX + 1] = {};
 static bool speaker_context_pending = false;
+static portMUX_TYPE speaker_context_mux = portMUX_INITIALIZER_UNLOCKED;
 
-/* Salin ring buffer (urut dari yang tertua) lalu kenali pembicara. */
-static void identify_speaker_from_ring(const int16_t *ring, size_t ring_pos, size_t ring_filled,
-                                       int16_t *scratch)
+typedef struct {
+    size_t samples;
+    int16_t *pcm;
+} speaker_id_job_t;
+
+static QueueHandle_t speaker_id_queue = nullptr;
+
+static void speaker_id_worker_task(void *arg)
 {
-    speaker_context_pending = false;
-    if (!ring || !scratch || !speaker_id_has_profiles() || ring_filled < 8000) return;
+    (void)arg;
+    for (;;) {
+        speaker_id_job_t *job = nullptr;
+        if (xQueueReceive(speaker_id_queue, &job, portMAX_DELAY) != pdTRUE || !job) continue;
+
+        speaker_id_result_t result = {};
+        const speaker_id_status_t st = speaker_id_identify(job->pcm, job->samples, &result);
+        if (st == SPEAKER_ID_OK && result.known) {
+            portENTER_CRITICAL(&speaker_context_mux);
+            strlcpy(speaker_pending_name, result.name, sizeof(speaker_pending_name));
+            speaker_context_pending = true;
+            portEXIT_CRITICAL(&speaker_context_mux);
+            ESP_LOGI(TAG, "Pembicara dikenal: %s", result.name);
+        } else if (st == SPEAKER_ID_OK) {
+            ESP_LOGI(TAG, "Pembicara tidak dikenal; Gemini tidak diberi nama (tidak disapa)");
+        } else {
+            ESP_LOGI(TAG, "Pengenal suara dilewati: %s", speaker_id_status_text(st));
+        }
+
+        heap_caps_free(job->pcm);
+        heap_caps_free(job);
+    }
+}
+
+/* Salin snapshot ring secara singkat; pengenalan berat dilakukan worker. */
+static void queue_speaker_identification(const int16_t *ring, size_t ring_pos, size_t ring_filled)
+{
+    if (!ring || !speaker_id_has_profiles() || ring_filled < 8000 || !speaker_id_queue) return;
+
+    speaker_id_job_t *job = (speaker_id_job_t *)heap_caps_malloc(
+        sizeof(speaker_id_job_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!job) {
+        ESP_LOGW(TAG, "Speaker ID dilewati: alokasi job gagal");
+        return;
+    }
+    job->pcm = (int16_t *)heap_caps_malloc(
+        ring_filled * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!job->pcm) {
+        heap_caps_free(job);
+        ESP_LOGW(TAG, "Speaker ID dilewati: alokasi snapshot PSRAM gagal");
+        return;
+    }
 
     const size_t start = (ring_filled < WAKE_RING_SAMPLES) ? 0 : ring_pos;
     for (size_t i = 0; i < ring_filled; ++i)
-        scratch[i] = ring[(start + i) % WAKE_RING_SAMPLES];
+        job->pcm[i] = ring[(start + i) % WAKE_RING_SAMPLES];
+    job->samples = ring_filled;
 
-    speaker_id_result_t result;
-    const speaker_id_status_t st = speaker_id_identify(scratch, ring_filled, &result);
-    if (st != SPEAKER_ID_OK) {
-        ESP_LOGI(TAG, "Pengenal suara dilewati: %s", speaker_id_status_text(st));
-        return;
-    }
-    if (result.known) {
-        strlcpy(speaker_pending_name, result.name, sizeof(speaker_pending_name));
-        speaker_context_pending = true;
-        ESP_LOGI(TAG, "Pembicara dikenal: %s", speaker_pending_name);
+    if (xQueueSend(speaker_id_queue, &job, 0) != pdTRUE) {
+        heap_caps_free(job->pcm);
+        heap_caps_free(job);
+        ESP_LOGW(TAG, "Speaker ID dilewati: worker masih sibuk");
     } else {
-        ESP_LOGI(TAG, "Pembicara tidak dikenal; Gemini tidak diberi nama (tidak disapa)");
+        ESP_LOGI(TAG, "Snapshot Speaker ID dikirim ke worker: %u sampel",
+                 (unsigned)ring_filled);
     }
 }
 
@@ -299,17 +342,27 @@ static void audio_task(void *arg)
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    /* Ring buffer 1,5 detik audio mentah + ruang salin, untuk pengenal suara. */
+    /* Worker MFCC+DTW terpisah supaya audio_task tidak tertahan saat identifikasi. */
+    if (speaker_id_is_ready()) {
+        speaker_id_queue = xQueueCreate(1, sizeof(speaker_id_job_t *));
+        if (speaker_id_queue) {
+            BaseType_t worker_result = xTaskCreatePinnedToCore(
+                speaker_id_worker_task, "speaker_id", 6144, nullptr, 3, nullptr, 0);
+            if (worker_result != pdPASS) {
+                vQueueDelete(speaker_id_queue);
+                speaker_id_queue = nullptr;
+                ESP_LOGW(TAG, "Speaker ID worker gagal dibuat; identifikasi nonaktif");
+            }
+        } else {
+            ESP_LOGW(TAG, "Speaker ID queue gagal dibuat; identifikasi nonaktif");
+        }
+    }
+
+    /* Ring buffer 1,5 detik audio mentah untuk snapshot Speaker ID. */
     int16_t *wake_ring = (int16_t *)heap_caps_calloc(
         WAKE_RING_SAMPLES, sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    int16_t *wake_scratch = (int16_t *)heap_caps_malloc(
-        WAKE_RING_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!wake_ring || !wake_scratch) {
+    if (!wake_ring) {
         ESP_LOGW(TAG, "Ring buffer pengenal suara gagal dialokasikan; sapaan nama dimatikan");
-        heap_caps_free(wake_ring);
-        heap_caps_free(wake_scratch);
-        wake_ring = nullptr;
-        wake_scratch = nullptr;
     }
     size_t wake_ring_pos = 0;
     size_t wake_ring_filled = 0;
@@ -420,7 +473,9 @@ static void audio_task(void *arg)
         }
 
         if (!assistant_active) {
+            portENTER_CRITICAL(&speaker_context_mux);
             speaker_context_pending = false;  // sesi lama selesai; jangan bawa nama ke sesi berikutnya
+            portEXIT_CRITICAL(&speaker_context_mux);
             // Wait for the previous WebSocket client to be destroyed before
             // detecting another wake word and starting a fresh Gemini session.
             if (websocket_lifecycle_busy()) {
@@ -470,7 +525,7 @@ static void audio_task(void *arg)
                     face_set_state(FACE_THINKING);
                     websocket_app_start();
                     /* Koneksi Gemini berjalan di task lain; sambil menunggu, kenali suara. */
-                    identify_speaker_from_ring(wake_ring, wake_ring_pos, wake_ring_filled, wake_scratch);
+                    queue_speaker_identification(wake_ring, wake_ring_pos, wake_ring_filled);
                     wake_ring_filled = 0;
                     buffer_pos = 0;
                     vTaskDelay(pdMS_TO_TICKS(10));
@@ -528,8 +583,20 @@ static void audio_task(void *arg)
 
         // Suara dikenal: beri tahu Gemini namanya sekali setelah sesi siap.
         // Suara tidak dikenal: tidak ada yang dikirim, jadi Gemini tidak menyapa.
-        if (speaker_context_pending && websocket_send_speaker_context(speaker_pending_name))
-            speaker_context_pending = false;
+        char speaker_name_to_send[SPEAKER_ID_NAME_MAX + 1] = {};
+        bool has_speaker_name = false;
+        portENTER_CRITICAL(&speaker_context_mux);
+        has_speaker_name = speaker_context_pending;
+        if (has_speaker_name)
+            strlcpy(speaker_name_to_send, speaker_pending_name, sizeof(speaker_name_to_send));
+        portEXIT_CRITICAL(&speaker_context_mux);
+        if (has_speaker_name && websocket_send_speaker_context(speaker_name_to_send)) {
+            portENTER_CRITICAL(&speaker_context_mux);
+            if (speaker_context_pending &&
+                strcmp(speaker_pending_name, speaker_name_to_send) == 0)
+                speaker_context_pending = false;
+            portEXIT_CRITICAL(&speaker_context_mux);
+        }
 
         // Gemini Live receives microphone audio continuously while the speaker is idle.
         // 1280 bytes = 640 samples = 40 ms at 16 kHz mono PCM16. A 40 ms
