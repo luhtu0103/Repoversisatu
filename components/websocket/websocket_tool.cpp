@@ -1,5 +1,6 @@
 #include "websocket_internal.h"
 #include "uart_control.h"
+#include "alarm.h"
 #include "esp_log.h"
 #include "esp_websocket_client.h"
 #include "cJSON.h"
@@ -29,7 +30,8 @@ static bool supported_tool_name(const char *name)
         strcmp(name, "memory_save") == 0 ||
         strcmp(name, "memory_delete") == 0 ||
         strcmp(name, "memory_read") == 0 ||
-        strcmp(name, "web_search") == 0);
+        strcmp(name, "web_search") == 0 ||
+        strcmp(name, "alarm_control") == 0);
 }
 
 static bool send_tool_payload(const char *id, const char *name, const char *result)
