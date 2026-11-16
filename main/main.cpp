@@ -436,13 +436,18 @@ static void audio_task(void *arg)
             display_status("Menunggu wakeword");
             continue;
         }
-        // Hard pause before any mic read or TX enqueue during search or TX congestion.
-        // The capture hardware stays enabled; buffered audio is discarded, not replayed.
+        // During web search/TX congestion, keep draining the capture queue.
+        // The I2S capture task stays active; not reading here fills its queue and
+        // causes avoidable MIC capture drops. Drain raw PCM only: never send or
+        // replay audio captured while uplink is paused/back-pressured.
         if (websocket_mic_uplink_paused || websocket_is_backpressured()) {
+            static uint8_t discard_pcm[1024];
+            if (audio_hal_is_mic_enabled())
+                (void)audio_read_mic_raw(discard_pcm, sizeof(discard_pcm));
             buffer_pos = 0;
             tx_backpressure_start_us = 0;
             consecutive_tx_enqueue_failures = 0;
-            vTaskDelay(pdMS_TO_TICKS(5));
+            vTaskDelay(pdMS_TO_TICKS(2));
             continue;
         }
 
