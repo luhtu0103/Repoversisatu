@@ -177,6 +177,21 @@ static bool save_root(cJSON *root)
     return true;
 }
 
+/* Hitung berapa byte teks yang dihasilkan ai_memory_get_context() untuk semua catatan.
+ * Format satu baris: "- key: value\n" => 5 byte tambahan + panjang key + value. */
+static size_t context_size_of(cJSON *root)
+{
+    size_t total = 0;
+    cJSON *entry = NULL;
+    cJSON_ArrayForEach(entry, root) {
+        cJSON *key = cJSON_GetObjectItem(entry, "key");
+        cJSON *value = cJSON_GetObjectItem(entry, "value");
+        if (!cJSON_IsString(key) || !cJSON_IsString(value)) continue;
+        total += strlen(key->valuestring) + strlen(value->valuestring) + 5;
+    }
+    return total;
+}
+
 bool ai_memory_init(void)
 {
     return ensure_mounted();
@@ -202,10 +217,20 @@ bool ai_memory_save(const char *key, const char *value)
         ESP_LOGE(TAG, "Simpan gagal: memory.json rusak/tidak dapat dibaca; data lama tidak ditimpa");
         return false;
     }
+    size_t current_size = context_size_of(root);
     cJSON *entry = NULL;
     cJSON_ArrayForEach(entry, root) {
         cJSON *existing_key = cJSON_GetObjectItem(entry, "key");
         if (cJSON_IsString(existing_key) && strcmp(existing_key->valuestring, key) == 0) {
+            cJSON *old_value = cJSON_GetObjectItem(entry, "value");
+            size_t old_len = cJSON_IsString(old_value) ? strlen(old_value->valuestring) : 0;
+            size_t new_size = current_size - old_len + strlen(value);
+            if (new_size > AI_MEMORY_CONTEXT_MAX) {
+                ESP_LOGE(TAG, "Simpan gagal: total catatan %u melebihi batas %u byte; hapus catatan lama dulu",
+                         (unsigned)new_size, (unsigned)AI_MEMORY_CONTEXT_MAX);
+                cJSON_Delete(root);
+                return false;
+            }
             cJSON *new_value = cJSON_CreateString(value);
             if (!new_value) { cJSON_Delete(root); return false; }
             cJSON_ReplaceItemInObject(entry, "value", new_value);
@@ -217,6 +242,13 @@ bool ai_memory_save(const char *key, const char *value)
     }
     if (cJSON_GetArraySize(root) >= 64) {
         ESP_LOGE(TAG, "Simpan gagal: batas 64 catatan tercapai");
+        cJSON_Delete(root);
+        return false;
+    }
+    size_t new_size = current_size + strlen(key) + strlen(value) + 5;
+    if (new_size > AI_MEMORY_CONTEXT_MAX) {
+        ESP_LOGE(TAG, "Simpan gagal: total catatan %u melebihi batas %u byte; hapus catatan lama dulu",
+                 (unsigned)new_size, (unsigned)AI_MEMORY_CONTEXT_MAX);
         cJSON_Delete(root);
         return false;
     }
@@ -370,6 +402,7 @@ size_t ai_memory_get_context(char *out, size_t out_size)
     cJSON *root = load_root();
     if (!root) return 0;
     size_t used = 0;
+    bool cut = false;
     cJSON *entry = NULL;
     cJSON_ArrayForEach(entry, root) {
         cJSON *key = cJSON_GetObjectItem(entry, "key");
@@ -377,8 +410,14 @@ size_t ai_memory_get_context(char *out, size_t out_size)
         if (!cJSON_IsString(key) || !cJSON_IsString(value)) continue;
         int written = snprintf(out + used, out_size - used, "- %s: %s\n",
                                key->valuestring, value->valuestring);
-        if (written < 0 || (size_t)written >= out_size - used) break;
+        if (written < 0 || (size_t)written >= out_size - used) { cut = true; break; }
         used += (size_t)written;
+    }
+    if (cut) {
+        /* Buang sisa potongan baris supaya tidak ada catatan setengah jadi. */
+        out[used] = '\0';
+        ESP_LOGW(TAG, "Sebagian catatan tidak muat di buffer (%u byte) dan tidak dikirim ke Gemini",
+                 (unsigned)out_size);
     }
     cJSON_Delete(root);
     return used;
