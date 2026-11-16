@@ -150,15 +150,26 @@ bool alarm_poll_due_internal(void)
 {
     const time_t now = time(NULL);
     bool fired = false;
+    bool missed = false;
     if (!clock_ready) return false;
     portENTER_CRITICAL(&alarm_mux);
     if (current_alarm.active && current_alarm.target_epoch > 0 &&
         now >= (time_t)current_alarm.target_epoch) {
         current_alarm.active = false;  // one-shot: mark consumed before triggering Gemini
-        due_pending = true;
-        fired = true;
+        if ((now - (time_t)current_alarm.target_epoch) > 300) {
+            missed = true;             // terlambat > 5 menit (mis. robot mati): jangan bunyi
+        } else {
+            due_pending = true;
+            fired = true;
+        }
     }
     portEXIT_CRITICAL(&alarm_mux);
+    if (missed) {
+        if (!persist_alarm()) ESP_LOGE(TAG, "Gagal menyimpan status alarm terlewat");
+        ESP_LOGW(TAG, "Alarm terlewat (lebih dari 5 menit): %02d:%02d WITA - %s",
+                 current_alarm.hour, current_alarm.minute, current_alarm.label);
+        return false;
+    }
     if (fired) {
         if (!persist_alarm()) ESP_LOGE(TAG, "Gagal menyimpan status alarm sudah terpicu");
         ESP_LOGW(TAG, "ALARM DUE: %02d:%02d WITA - %s",
