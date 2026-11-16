@@ -123,9 +123,11 @@ bool websocket_send_alarm_prompt(int hour, int minute, const char *label)
 
     char safe[96];
     size_t j = 0;
-    for (const unsigned char *p = (const unsigned char *)label; *p && j + 1 < sizeof(safe); ++p) {
+    for (const unsigned char *p = (const unsigned char *)label; *p; ++p) {
         if (*p < 0x20 || *p == 0x7F) continue;
-        if (*p == '"' || *p == '\\') safe[j++] = '\\';
+        const bool needs_escape = (*p == '"' || *p == '\\');
+        if (j + (needs_escape ? 2U : 1U) >= sizeof(safe)) break;
+        if (needs_escape) safe[j++] = '\\';
         safe[j++] = (char)*p;
     }
     safe[j] = '\0';
