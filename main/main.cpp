@@ -196,15 +196,15 @@ static void debug_network_path(void)
     ESP_LOGI(TAG, "========================================");
 }
 
-static void sync_sntp_time(void)
+static bool sync_sntp_time(void)
 {
     setenv("TZ", "WITA-8", 1);  // WITA = UTC+8, tanpa DST
     tzset();
     ESP_LOGI(TAG, "Mencari server NTP..."); display_status("Sync Jam Network..");
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL); esp_sntp_setservername(0, "time.google.com"); esp_sntp_setservername(1, "id.pool.ntp.org"); esp_sntp_setservername(2, "pool.ntp.org"); esp_sntp_init();
     int retry = 0; const int max_retries = 10; time_t now = 0; struct tm timeinfo = {};
-    while (retry < max_retries) { time(&now); localtime_r(&now, &timeinfo); if (timeinfo.tm_year >= (2024 - 1900)) { ESP_LOGI(TAG, "Waktu cocok! Tahun: %d", timeinfo.tm_year + 1900); display_status("Jam Cocok!"); vTaskDelay(pdMS_TO_TICKS(1000)); return; } vTaskDelay(pdMS_TO_TICKS(500)); retry++; }
-    ESP_LOGW(TAG, "NTP gagal. Menggunakan waktu fallback."); struct timeval tv = { .tv_sec = NTP_FALLBACK_TIMESTAMP, .tv_usec = 0 }; settimeofday(&tv, NULL); display_status("Jam Set Fallback"); vTaskDelay(pdMS_TO_TICKS(1000));
+    while (retry < max_retries) { time(&now); localtime_r(&now, &timeinfo); if (timeinfo.tm_year >= (2024 - 1900)) { ESP_LOGI(TAG, "Waktu cocok! Tahun: %d", timeinfo.tm_year + 1900); display_status("Jam Cocok!"); vTaskDelay(pdMS_TO_TICKS(1000)); return true; } vTaskDelay(pdMS_TO_TICKS(500)); retry++; }
+    ESP_LOGW(TAG, "NTP gagal. Menggunakan waktu fallback."); struct timeval tv = { .tv_sec = NTP_FALLBACK_TIMESTAMP, .tv_usec = 0 }; settimeofday(&tv, NULL); display_status("Jam Set Fallback"); vTaskDelay(pdMS_TO_TICKS(1000)); return false;
 }
 
 static volatile bool assistant_active = false;
@@ -753,7 +753,7 @@ extern "C" void app_main()
         esp_restart();
     }
 
-    esp_wifi_set_ps(WIFI_PS_NONE); ESP_LOGI(TAG, "WiFi power save dimatikan"); ESP_LOGI(TAG, "WIFI READY - lanjut ke NTP"); sync_sntp_time(); if (!alarm_init()) ESP_LOGW(TAG, "Alarm NVS belum siap; fitur alarm mungkin belum bisa digunakan"); ESP_LOGI(TAG, "Menunggu 1 detik..."); vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_wifi_set_ps(WIFI_PS_NONE); ESP_LOGI(TAG, "WiFi power save dimatikan"); ESP_LOGI(TAG, "WIFI READY - lanjut ke NTP"); bool ntp_time_synced = sync_sntp_time(); alarm_set_time_ready(ntp_time_synced); if (!alarm_init()) ESP_LOGW(TAG, "Alarm NVS belum siap; fitur alarm mungkin belum bisa digunakan"); ESP_LOGI(TAG, "Menunggu 1 detik..."); vTaskDelay(pdMS_TO_TICKS(1000));
     debug_network_path(); vTaskDelay(pdMS_TO_TICKS(1000)); face_set_state(FACE_SLEEP); display_status("Sistem siap. Katakan Hi, ESP...");
 
     BaseType_t task_result = xTaskCreate(audio_task, "audio_task", 10240, NULL, 5, NULL); if (task_result != pdPASS) ESP_LOGE(TAG, "Gagal membuat audio_task!"); else ESP_LOGI(TAG, "audio_task berhasil dimulai.");
