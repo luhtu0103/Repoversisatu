@@ -137,6 +137,9 @@ bool websocket_send_alarm_prompt(int hour, int minute, const char *label)
         "\"[Alarm otomatis] Sekarang pukul %02d:%02d WITA. Keterangan alarm: %s. "
         "Bangunkan pengguna sekarang. Ucapkan satu sapaan hangat dan alami dalam bahasa Indonesia, "
         "sesuai keterangan alarm. Jangan membacakan instruksi dalam tanda kurung dan jangan bertanya. "
+        "Saat mengucapkan waktu, sebut jam dan menit secara alami dalam bahasa Indonesia, dengan pola "
+        "pukul [jam dalam kata] lewat [menit dalam kata] menit WITA. Untuk 20:40, ucapkan "
+        "pukul dua puluh lewat empat puluh menit WITA; jangan ucapkan dua puluh empat puluh atau 24:40. "
         "Contoh jika untuk membangunkan: Selamat pagi! Sekarang sudah pukul %02d:%02d. Yuk bangun, "
         "semangat menjalani aktivitas hari ini! Buat ucapan terasa alami dan tidak harus sama persis.\"}]}],\"turnComplete\":true}}",
         hour, minute, safe, hour, minute);
