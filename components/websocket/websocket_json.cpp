@@ -627,7 +627,24 @@ static void process_gemini_tool_call(cJSON *tool_call)
                         "Gagal: jam, menit, dan keterangan alarm harus lengkap.");
                     continue;
                 }
-                success = alarm_set(hour->valueint, minute->valueint, label->valuestring, detail, sizeof(detail));
+                const char *effective_label = label->valuestring;
+                /* Gemini occasionally collapses a spoken purpose to the generic
+                 * label "Alarm". Recover an explicit wake-up purpose from the
+                 * user's actual transcript instead of losing it in NVS. */
+                if (strcmp(effective_label, "Alarm") == 0 ||
+                    strcmp(effective_label, "alarm") == 0 ||
+                    strcmp(effective_label, "pengingat") == 0) {
+                    static const char *const wakeup_terms[] = {
+                        "membangunkan", "bangunkan", "bangun pagi", "waktu bangun"
+                    };
+                    if (transcript_has_any(latest_user_transcript, wakeup_terms,
+                            sizeof(wakeup_terms) / sizeof(wakeup_terms[0]))) {
+                        effective_label = "untuk membangunkan";
+                        ESP_LOGW(TAG, "ALARM: label generik diperbaiki dari transkrip menjadi '%s'",
+                                 effective_label);
+                    }
+                }
+                success = alarm_set(hour->valueint, minute->valueint, effective_label, detail, sizeof(detail));
             } else if (strcmp(action->valuestring, "cancel") == 0) {
                 success = alarm_cancel(detail, sizeof(detail));
             } else if (strcmp(action->valuestring, "status") == 0) {
