@@ -1,6 +1,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -16,6 +17,7 @@ bool alarm_set(int hour, int minute, const char *label, char *result, size_t res
 bool alarm_cancel(char *result, size_t result_size);
 bool alarm_get(alarm_info_t *info);
 bool alarm_take_due(alarm_info_t *info);
+bool alarm_poll_due_internal(void);
 #ifdef __cplusplus
 }
 #endif
