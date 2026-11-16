@@ -238,9 +238,9 @@ static void websocket_tx_task(void *arg)
             if (sent == (int)cmd.len) websocket_last_tx_ms = (uint32_t)(esp_timer_get_time() / 1000);
             else __atomic_add_fetch(&websocket_tx_fail_count, 1U, __ATOMIC_RELAXED);
             if (sent != (int)cmd.len)
-                ESP_LOGW(TAG, "Touch prompt TX gagal: sent=%d expected=%u", sent, (unsigned)cmd.len);
+                ESP_LOGW(TAG, "Pesan teks TX gagal: sent=%d expected=%u", sent, (unsigned)cmd.len);
             else
-                ESP_LOGI(TAG, "Touch prompt terkirim ke Gemini: %u byte", (unsigned)cmd.len);
+                ESP_LOGI(TAG, "Pesan teks terkirim ke Gemini: %u byte", (unsigned)cmd.len);
             free(audio_data);
             continue;
         }
