@@ -27,6 +27,7 @@ idf_component_register(
         web_config
         ai_memory
         servo_head
+        alarm
 )
 
 target_link_libraries(${COMPONENT_LIB} INTERFACE
