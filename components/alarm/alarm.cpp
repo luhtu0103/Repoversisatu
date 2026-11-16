@@ -11,6 +11,7 @@ static const char *TAG = "ALARM";
 static const char *NS = "alarmcfg";
 static alarm_info_t current_alarm = {};
 static bool due_pending = false;
+static bool clock_ready = false;
 static portMUX_TYPE alarm_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static bool persist_alarm(void)
@@ -25,6 +26,14 @@ static bool persist_alarm(void)
     if (e == ESP_OK) e = nvs_commit(h);
     nvs_close(h);
     return e == ESP_OK;
+}
+
+void alarm_set_time_ready(bool ready)
+{
+    portENTER_CRITICAL(&alarm_mux);
+    clock_ready = ready;
+    portEXIT_CRITICAL(&alarm_mux);
+    ESP_LOGI(TAG, "Clock readiness=%s", ready ? "NTP valid" : "NTP unavailable; alarm firing disabled");
 }
 
 bool alarm_init(void)
@@ -59,6 +68,10 @@ bool alarm_set(int hour, int minute, const char *label, char *result, size_t res
 {
     if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || !label || !label[0]) {
         if (result && result_size) snprintf(result, result_size, "Gagal: waktu atau keterangan alarm tidak valid.");
+        return false;
+    }
+    if (!clock_ready) {
+        if (result && result_size) snprintf(result, result_size, "Gagal: waktu NTP belum tersinkronisasi. Alarm tidak disetel agar tidak meleset.");
         return false;
     }
     time_t now = time(NULL);
@@ -137,6 +150,7 @@ bool alarm_poll_due_internal(void)
 {
     const time_t now = time(NULL);
     bool fired = false;
+    if (!clock_ready) return false;
     portENTER_CRITICAL(&alarm_mux);
     if (current_alarm.active && current_alarm.target_epoch > 0 &&
         now >= (time_t)current_alarm.target_epoch) {
