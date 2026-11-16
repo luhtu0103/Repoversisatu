@@ -5,6 +5,7 @@
 #include "uart_control.h"
 #include "ai_memory.h"
 #include "servo_head.h"
+#include "alarm.h"
 
 #include "esp_attr.h"
 #include "esp_log.h"
@@ -239,6 +240,48 @@ static void add_web_search_tool(cJSON *setup)
     cJSON_AddItemToArray(decls, decl);
 }
 
+static void add_alarm_tool(cJSON *setup)
+{
+    if (!setup) return;
+    cJSON *tools = cJSON_GetObjectItem(setup, "tools");
+    if (!cJSON_IsArray(tools)) return;
+    cJSON *tool = NULL, *decls = NULL;
+    cJSON_ArrayForEach(tool, tools) {
+        decls = cJSON_GetObjectItem(tool, "functionDeclarations");
+        if (cJSON_IsArray(decls)) break;
+        decls = NULL;
+    }
+    if (!decls) return;
+    cJSON *decl = cJSON_CreateObject();
+    if (!decl) return;
+    cJSON_AddStringToObject(decl, "name", "alarm_control");
+    cJSON_AddStringToObject(decl, "behavior", "BLOCKING");
+    cJSON_AddStringToObject(decl, "description",
+        "Kelola alarm suara perangkat. Panggil HANYA saat pengguna secara eksplisit meminta memasang/menyetel/mengubah alarm, melihat alarm, atau membatalkan/menghapus alarm. Zona waktu selalu WITA (UTC+8). Untuk memasang alarm, tentukan jam 0-23, menit 0-59, dan label/keterangan singkat yang merangkum tujuan alarm, misalnya 'untuk membangunkan'. Jangan mengarang waktu atau keterangan; jika waktu tidak jelas, tanyakan dulu. Untuk melihat status gunakan action=status; untuk membatalkan gunakan action=cancel. Setelah tool memberi hasil, sampaikan konfirmasi suara berdasarkan hasil itu dan jangan mengaku berhasil jika gagal.");
+    cJSON *params = cJSON_AddObjectToObject(decl, "parameters");
+    cJSON_AddStringToObject(params, "type", "OBJECT");
+    cJSON *props = cJSON_AddObjectToObject(params, "properties");
+    cJSON *action = cJSON_AddObjectToObject(props, "action");
+    cJSON_AddStringToObject(action, "type", "STRING");
+    cJSON_AddStringToObject(action, "description", "Aksi alarm: set, status, atau cancel.");
+    cJSON *action_enum = cJSON_AddArrayToObject(action, "enum");
+    cJSON_AddItemToArray(action_enum, cJSON_CreateString("set"));
+    cJSON_AddItemToArray(action_enum, cJSON_CreateString("status"));
+    cJSON_AddItemToArray(action_enum, cJSON_CreateString("cancel"));
+    cJSON *hour = cJSON_AddObjectToObject(props, "hour");
+    cJSON_AddStringToObject(hour, "type", "INTEGER");
+    cJSON_AddStringToObject(hour, "description", "Jam WITA format 24 jam, 0 sampai 23; wajib untuk action=set.");
+    cJSON *minute = cJSON_AddObjectToObject(props, "minute");
+    cJSON_AddStringToObject(minute, "type", "INTEGER");
+    cJSON_AddStringToObject(minute, "description", "Menit 0 sampai 59; wajib untuk action=set.");
+    cJSON *label = cJSON_AddObjectToObject(props, "label");
+    cJSON_AddStringToObject(label, "type", "STRING");
+    cJSON_AddStringToObject(label, "description", "Keterangan tujuan alarm, misalnya 'Alarm untuk membangunkan'. Wajib untuk action=set.");
+    cJSON *required = cJSON_AddArrayToObject(params, "required");
+    cJSON_AddItemToArray(required, cJSON_CreateString("action"));
+    cJSON_AddItemToArray(decls, decl);
+}
+
 bool build_gemini_setup(char **output, size_t *output_len)
 {
     if (!output || !output_len) return false;
@@ -266,7 +309,7 @@ bool build_gemini_setup(char **output, size_t *output_len)
     cJSON *system_parts = cJSON_AddArrayToObject(system_instruction, "parts");
     cJSON *system_text = cJSON_CreateObject();
     cJSON_AddStringToObject(system_text, "text",
-            "Kamu adalah asisten suara berbahasa Indonesia. " 
+            "Kamu adalah asisten suara berbahasa Indonesia. Untuk alarm, patuhi zona waktu WITA (UTC+8). Jika pengguna secara eksplisit meminta memasang, mengubah, melihat, atau membatalkan alarm, gunakan tool alarm_control dan jangan hanya menjanjikan tindakan. Jika waktu atau tujuan alarm tidak jelas, tanyakan klarifikasi sebelum memanggil tool. Alarm yang tiba akan memulai sesi Gemini otomatis; ucapkan sapaan pembangun yang alami sesuai keterangan alarm, tanpa nada alarm. " 
     "Dalam sesi percakapan Gemini Live yang sedang aktif, gunakan konteks percakapan sebelumnya pada sesi yang sama untuk memahami rujukan dan pertanyaan lanjutan; jangan memperlakukan setiap turn sebagai percakapan baru. " 
     "Konteks sesi hanya berlaku untuk sesi aktif. Ketika perangkat memulai sesi baru tanpa session-resumption handle, perlakukan percakapan sebagai baru dan jangan menganggap kamu mengingat sesi sebelumnya. "
     "Jika pengguna meminta aksi pada perangkat, gunakan fungsi control_device dengan command tombol yang tepat. "
@@ -314,6 +357,7 @@ bool build_gemini_setup(char **output, size_t *output_len)
     add_device_control_tool(setup);
     add_memory_tools(setup);
     add_web_search_tool(setup);
+    add_alarm_tool(setup);
 
     cJSON *realtime = cJSON_AddObjectToObject(setup, "realtimeInputConfig");
     cJSON *aad = cJSON_AddObjectToObject(realtime, "automaticActivityDetection");
