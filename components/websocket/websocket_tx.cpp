@@ -131,7 +131,7 @@ bool websocket_send_alarm_prompt(int hour, int minute, const char *label)
         safe[j++] = (char)*p;
     }
     safe[j] = '\0';
-    char json[768];
+    char json[1024];
     int n = snprintf(json, sizeof(json),
         "{\"clientContent\":{\"turns\":[{\"role\":\"user\",\"parts\":[{\"text\":"
         "\"[Alarm otomatis] Sekarang pukul %02d:%02d WITA. Keterangan alarm: %s. "
