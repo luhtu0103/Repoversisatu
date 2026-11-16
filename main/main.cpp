@@ -385,7 +385,9 @@ static void audio_task(void *arg)
 
     bool standby_pending = false;
     int64_t standby_requested_us = 0;
-    constexpr int64_t STANDBY_PLAYBACK_DRAIN_TIMEOUT_US = 8000000LL;
+    /* Alarm voice responses can be longer than a normal acknowledgement. Do not
+     * disconnect while Gemini is still generating/playing the wake-up message. */
+    constexpr int64_t STANDBY_PLAYBACK_DRAIN_TIMEOUT_US = 60000000LL;
 
     while (1) {
         if (alarm_poll_due_internal()) {
@@ -413,14 +415,14 @@ static void audio_task(void *arg)
         if (websocket_take_standby_request()) {
             standby_pending = true;
             standby_requested_us = esp_timer_get_time();
-            ESP_LOGI(TAG, "STANDBY REQUESTED -> menunggu playback selesai (maksimal 8 detik)");
+            ESP_LOGI(TAG, "STANDBY REQUESTED -> menunggu playback selesai (batas pengaman 60 detik)");
         }
         bool standby_audio_done = standby_pending && websocket_take_audio_playback_complete();
         bool standby_drain_timeout = standby_pending && standby_requested_us > 0 &&
             (esp_timer_get_time() - standby_requested_us >= STANDBY_PLAYBACK_DRAIN_TIMEOUT_US);
         if (standby_pending && (standby_audio_done || standby_drain_timeout)) {
             if (standby_drain_timeout && !standby_audio_done)
-                ESP_LOGW(TAG, "STANDBY: timeout menunggu playback; paksa kembali ke wake word");
+                ESP_LOGW(TAG, "STANDBY: timeout pengaman 60 detik; playback belum selesai, sesi diakhiri");
             else
                 ESP_LOGI(TAG, "STANDBY: playback selesai -> kembali menunggu wake word");
             websocket_request_fresh_session_reset();
