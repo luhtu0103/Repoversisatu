@@ -21,7 +21,7 @@ static bool afe_init_attempted = false;
 static uint32_t afe_fallback_count = 0;
 
 #define MIC_CAPTURE_SAMPLES 512
-#define MIC_CAPTURE_QUEUE_LENGTH 8
+#define MIC_CAPTURE_QUEUE_LENGTH 16
 typedef struct { int16_t pcm[MIC_CAPTURE_SAMPLES]; } mic_capture_frame_t;
 static QueueHandle_t mic_capture_queue = NULL;
 static QueueHandle_t mic_capture_free_queue = NULL;
@@ -96,8 +96,9 @@ static void mic_capture_task(void *arg)
     (void)arg;
     int32_t raw[MIC_CAPTURE_SAMPLES];
     size_t raw_samples = 0;
-    ESP_LOGI(TAG, "Microphone capture task started: 16kHz PCM16 frames=%u samples queue=%u",
-             (unsigned)MIC_CAPTURE_SAMPLES, (unsigned)MIC_CAPTURE_QUEUE_LENGTH);
+    ESP_LOGI(TAG, "Microphone capture task started: 16kHz PCM16 frames=%u samples queue=%u (~%u ms buffering)",
+             (unsigned)MIC_CAPTURE_SAMPLES, (unsigned)MIC_CAPTURE_QUEUE_LENGTH,
+             (unsigned)(MIC_CAPTURE_QUEUE_LENGTH * MIC_CAPTURE_SAMPLES * 1000U / MIC_SAMPLE_RATE));
     for (;;) {
         size_t bytes_read = 0;
         const size_t bytes_needed = (MIC_CAPTURE_SAMPLES - raw_samples) * sizeof(int32_t);

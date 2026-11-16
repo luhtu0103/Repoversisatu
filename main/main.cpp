@@ -10,8 +10,11 @@
 #include "touch_emotion.h"
 #include "servo_head.h"
 #include "led_rgb.h"
+#include "speaker_id.h"
+#include "alarm.h"
 
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "esp_psram.h"
@@ -20,6 +23,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 
 #include "nvs_flash.h"
 #include "esp_sntp.h"
@@ -28,11 +32,15 @@
 #include <time.h>
 
 #include <string.h>
+#include <stdlib.h>
 #include <errno.h>
 #include <netdb.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+
+constexpr uint32_t AUDIO_VOICE_ENERGY_THRESHOLD_SQ = 1440000;  // 1200^2
+constexpr time_t NTP_FALLBACK_TIMESTAMP = 1770000000;  // 2026-02-02 UTC
 
 static const char *TAG = "MAIN";
 #define BOOT_BUTTON_GPIO GPIO_NUM_0
@@ -188,20 +196,106 @@ static void debug_network_path(void)
     ESP_LOGI(TAG, "========================================");
 }
 
-static void sync_sntp_time(void)
+static bool sync_sntp_time(void)
 {
+    setenv("TZ", "WITA-8", 1);  // WITA = UTC+8, tanpa DST
+    tzset();
     ESP_LOGI(TAG, "Mencari server NTP..."); display_status("Sync Jam Network..");
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL); esp_sntp_setservername(0, "time.google.com"); esp_sntp_setservername(1, "id.pool.ntp.org"); esp_sntp_setservername(2, "pool.ntp.org"); esp_sntp_init();
     int retry = 0; const int max_retries = 10; time_t now = 0; struct tm timeinfo = {};
-    while (retry < max_retries) { time(&now); localtime_r(&now, &timeinfo); if (timeinfo.tm_year >= (2024 - 1900)) { ESP_LOGI(TAG, "Waktu cocok! Tahun: %d", timeinfo.tm_year + 1900); display_status("Jam Cocok!"); vTaskDelay(pdMS_TO_TICKS(1000)); return; } vTaskDelay(pdMS_TO_TICKS(500)); retry++; }
-    ESP_LOGW(TAG, "NTP gagal. Menggunakan waktu fallback."); struct timeval tv = { .tv_sec = 1770000000, .tv_usec = 0 }; settimeofday(&tv, NULL); display_status("Jam Set Fallback"); vTaskDelay(pdMS_TO_TICKS(1000));
+    while (retry < max_retries) { time(&now); localtime_r(&now, &timeinfo); if (timeinfo.tm_year >= (2024 - 1900)) { ESP_LOGI(TAG, "Waktu cocok! Tahun: %d", timeinfo.tm_year + 1900); display_status("Jam Cocok!"); vTaskDelay(pdMS_TO_TICKS(1000)); return true; } vTaskDelay(pdMS_TO_TICKS(500)); retry++; }
+    ESP_LOGW(TAG, "NTP gagal. Menggunakan waktu fallback."); struct timeval tv = { .tv_sec = NTP_FALLBACK_TIMESTAMP, .tv_usec = 0 }; settimeofday(&tv, NULL); display_status("Jam Set Fallback"); vTaskDelay(pdMS_TO_TICKS(1000)); return false;
 }
 
 static volatile bool assistant_active = false;
 static volatile bool led_boot_phase = true;
 static volatile bool led_wifi_config_mode = false;
 static volatile bool mic_voice_detected = false;
-static int64_t connect_start_us = 0;
+static int64_t disconnect_wait_start_us = 0;
+static bool alarm_prompt_pending = false;
+static alarm_info_t alarm_prompt_info = {};
+
+/* Ring 1,5 detik audio mentah untuk Speaker ID. MFCC+DTW harus berjalan
+ * di worker terpisah agar audio_task tetap menguras antrean mikrofon. */
+constexpr size_t WAKE_RING_SAMPLES = 24000;
+static char speaker_pending_name[SPEAKER_ID_NAME_MAX + 1] = {};
+static bool speaker_context_pending = false;
+static portMUX_TYPE speaker_context_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint32_t speaker_session_seq = 0;  // naik tiap sesi berakhir
+
+typedef struct {
+    size_t samples;
+    int16_t *pcm;
+    uint32_t seq;
+} speaker_id_job_t;
+
+static QueueHandle_t speaker_id_queue = nullptr;
+
+static void speaker_id_worker_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        speaker_id_job_t *job = nullptr;
+        if (xQueueReceive(speaker_id_queue, &job, portMAX_DELAY) != pdTRUE || !job) continue;
+
+        speaker_id_result_t result = {};
+        const speaker_id_status_t st = speaker_id_identify(job->pcm, job->samples, &result);
+        if (st == SPEAKER_ID_OK && result.known) {
+            bool accepted = false;
+            portENTER_CRITICAL(&speaker_context_mux);
+            if (job->seq == speaker_session_seq) {
+                strlcpy(speaker_pending_name, result.name, sizeof(speaker_pending_name));
+                speaker_context_pending = true;
+                accepted = true;
+            }
+            portEXIT_CRITICAL(&speaker_context_mux);
+            if (accepted) ESP_LOGI(TAG, "Pembicara dikenal: %s", result.name);
+            else ESP_LOGW(TAG, "Hasil Speaker ID dibuang (sesi sudah berakhir): %s", result.name);
+        } else if (st == SPEAKER_ID_OK) {
+            ESP_LOGI(TAG, "Pembicara tidak dikenal; Gemini tidak diberi nama (tidak disapa)");
+        } else {
+            ESP_LOGI(TAG, "Pengenal suara dilewati: %s", speaker_id_status_text(st));
+        }
+
+        heap_caps_free(job->pcm);
+        heap_caps_free(job);
+    }
+}
+
+/* Salin snapshot ring secara singkat; pengenalan berat dilakukan worker. */
+static void queue_speaker_identification(const int16_t *ring, size_t ring_pos, size_t ring_filled)
+{
+    if (!ring || !speaker_id_has_profiles() || ring_filled < 8000 || !speaker_id_queue) return;
+
+    speaker_id_job_t *job = (speaker_id_job_t *)heap_caps_malloc(
+        sizeof(speaker_id_job_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!job) {
+        ESP_LOGW(TAG, "Speaker ID dilewati: alokasi job gagal");
+        return;
+    }
+    job->pcm = (int16_t *)heap_caps_malloc(
+        ring_filled * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!job->pcm) {
+        heap_caps_free(job);
+        ESP_LOGW(TAG, "Speaker ID dilewati: alokasi snapshot PSRAM gagal");
+        return;
+    }
+
+    const size_t start = (ring_filled < WAKE_RING_SAMPLES) ? 0 : ring_pos;
+    for (size_t i = 0; i < ring_filled; ++i)
+        job->pcm[i] = ring[(start + i) % WAKE_RING_SAMPLES];
+    job->samples = ring_filled;
+    job->seq = speaker_session_seq;
+
+    if (xQueueSend(speaker_id_queue, &job, 0) != pdTRUE) {
+        heap_caps_free(job->pcm);
+        heap_caps_free(job);
+        ESP_LOGW(TAG, "Speaker ID dilewati: worker masih sibuk");
+    } else {
+        ESP_LOGI(TAG, "Snapshot Speaker ID dikirim ke worker: %u sampel",
+                 (unsigned)ring_filled);
+    }
+}
 
 static void led_status_task(void *arg)
 {
@@ -240,7 +334,8 @@ static void led_status_task(void *arg)
 static void audio_task(void *arg)
 {
     (void)arg;
-    constexpr size_t AUDIO_BUFFER_SIZE = 8192;
+    /* Buffer up to ~1 second of 16 kHz PCM while WebSocket TX is back-pressured. */
+    constexpr size_t AUDIO_BUFFER_SIZE = 32768;
     uint8_t *audio_buffer = (uint8_t *)heap_caps_malloc(
         AUDIO_BUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     const char *audio_buffer_location = "PSRAM";
@@ -261,6 +356,30 @@ static void audio_task(void *arg)
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    /* Worker MFCC+DTW terpisah supaya audio_task tidak tertahan saat identifikasi. */
+    if (speaker_id_is_ready()) {
+        speaker_id_queue = xQueueCreate(1, sizeof(speaker_id_job_t *));
+        if (speaker_id_queue) {
+            BaseType_t worker_result = xTaskCreatePinnedToCore(
+                speaker_id_worker_task, "speaker_id", 6144, nullptr, 2, nullptr, 1);
+            if (worker_result != pdPASS) {
+                vQueueDelete(speaker_id_queue);
+                speaker_id_queue = nullptr;
+                ESP_LOGW(TAG, "Speaker ID worker gagal dibuat; identifikasi nonaktif");
+            }
+        } else {
+            ESP_LOGW(TAG, "Speaker ID queue gagal dibuat; identifikasi nonaktif");
+        }
+    }
+
+    /* Ring buffer 1,5 detik audio mentah untuk snapshot Speaker ID. */
+    int16_t *wake_ring = (int16_t *)heap_caps_calloc(
+        WAKE_RING_SAMPLES, sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!wake_ring) {
+        ESP_LOGW(TAG, "Ring buffer pengenal suara gagal dialokasikan; sapaan nama dimatikan");
+    }
+    size_t wake_ring_pos = 0;
+    size_t wake_ring_filled = 0;
     size_t buffer_pos = 0;
     size_t buffer_high_water = 0;
     uint64_t mic_buffer_lost_bytes = 0;
@@ -274,20 +393,44 @@ static void audio_task(void *arg)
 
     bool standby_pending = false;
     int64_t standby_requested_us = 0;
-    constexpr int64_t STANDBY_PLAYBACK_DRAIN_TIMEOUT_US = 8000000LL;
+    /* Alarm voice responses can be longer than a normal acknowledgement. Do not
+     * disconnect while Gemini is still generating/playing the wake-up message. */
+    constexpr int64_t STANDBY_PLAYBACK_DRAIN_TIMEOUT_US = 60000000LL;
 
     while (1) {
+        if (alarm_poll_due_internal()) {
+            alarm_info_t fired = {};
+            if (alarm_take_due(&fired)) {
+                alarm_prompt_info = fired;
+                alarm_prompt_pending = true;
+                ESP_LOGW(TAG, "ALARM: waktu %02d:%02d WITA tiba; memulai Gemini otomatis. Keterangan=%s",
+                         fired.hour, fired.minute, fired.label);
+                display_status("Alarm: memulai Gemini");
+                if (!assistant_active && !websocket_lifecycle_busy()) {
+                    assistant_active = true;
+                    disconnect_wait_start_us = 0;
+                    face_set_state(FACE_THINKING);
+                    websocket_app_start();
+                }
+            }
+        }
+        if (alarm_prompt_pending && !assistant_active && !websocket_lifecycle_busy()) {
+            assistant_active = true;
+            disconnect_wait_start_us = 0;
+            face_set_state(FACE_THINKING);
+            websocket_app_start();
+        }
         if (websocket_take_standby_request()) {
             standby_pending = true;
             standby_requested_us = esp_timer_get_time();
-            ESP_LOGI(TAG, "STANDBY REQUESTED -> menunggu playback selesai (maksimal 8 detik)");
+            ESP_LOGI(TAG, "STANDBY REQUESTED -> menunggu playback selesai (batas pengaman 60 detik)");
         }
         bool standby_audio_done = standby_pending && websocket_take_audio_playback_complete();
         bool standby_drain_timeout = standby_pending && standby_requested_us > 0 &&
             (esp_timer_get_time() - standby_requested_us >= STANDBY_PLAYBACK_DRAIN_TIMEOUT_US);
         if (standby_pending && (standby_audio_done || standby_drain_timeout)) {
             if (standby_drain_timeout && !standby_audio_done)
-                ESP_LOGW(TAG, "STANDBY: timeout menunggu playback; paksa kembali ke wake word");
+                ESP_LOGW(TAG, "STANDBY: timeout pengaman 60 detik; playback belum selesai, sesi diakhiri");
             else
                 ESP_LOGI(TAG, "STANDBY: playback selesai -> kembali menunggu wake word");
             websocket_request_fresh_session_reset();
@@ -301,6 +444,21 @@ static void audio_task(void *arg)
             display_status("Menunggu wakeword");
             continue;
         }
+        // During web search/TX congestion, keep draining the capture queue.
+        // The I2S capture task stays active; not reading here fills its queue and
+        // causes avoidable MIC capture drops. Drain raw PCM only: never send or
+        // replay audio captured while uplink is paused/back-pressured.
+        if (websocket_mic_uplink_paused || websocket_is_backpressured()) {
+            static uint8_t discard_pcm[1024];
+            if (audio_hal_is_mic_enabled())
+                (void)audio_read_mic_raw(discard_pcm, sizeof(discard_pcm));
+            buffer_pos = 0;
+            tx_backpressure_start_us = 0;
+            consecutive_tx_enqueue_failures = 0;
+            vTaskDelay(pdMS_TO_TICKS(2));
+            continue;
+        }
+
         // WakeNet gets the same raw I2S PCM path as Repo5. Keep NSNet2 and
         // conversation gain exclusively on the active Gemini audio path.
         const bool mic_buffer_full = buffer_pos >= AUDIO_BUFFER_SIZE;
@@ -322,7 +480,12 @@ static void audio_task(void *arg)
             vTaskDelay(1);
             continue;
         }
-        if (mic_buffer_full) {
+        if (websocket_mic_uplink_paused) {
+            if (bytes_read > 0) mic_buffer_lost_bytes += bytes_read;
+            buffer_pos = 0; // Never buffer/replay speech captured during a web search.
+            tx_backpressure_start_us = 0;
+            consecutive_tx_enqueue_failures = 0;
+        } else if (mic_buffer_full) {
             if (bytes_read > 0) mic_buffer_lost_bytes += bytes_read;
             int64_t now_us = esp_timer_get_time();
             if (now_us - last_tx_diag_us >= 1000000) {
@@ -346,13 +509,17 @@ static void audio_task(void *arg)
                     energy_sum += (uint64_t)(sample * sample);
                 }
                 const uint32_t mean_energy = (uint32_t)(energy_sum / sample_count);
-                mic_voice_detected = mean_energy > (uint32_t)(1200 * 1200);
+                mic_voice_detected = mean_energy > AUDIO_VOICE_ENERGY_THRESHOLD_SQ;
             } else {
                 mic_voice_detected = false;
             }
         }
 
         if (!assistant_active) {
+            portENTER_CRITICAL(&speaker_context_mux);
+            speaker_context_pending = false;  // sesi lama selesai; jangan bawa nama ke sesi berikutnya
+            speaker_session_seq = speaker_session_seq + 1;  // hasil worker yang terlambat jadi basi
+            portEXIT_CRITICAL(&speaker_context_mux);
             // Wait for the previous WebSocket client to be destroyed before
             // detecting another wake word and starting a fresh Gemini session.
             if (websocket_lifecycle_busy()) {
@@ -382,6 +549,14 @@ static void audio_task(void *arg)
                    buffer_pos >= (size_t)wakeword_get_chunk_samples() * sizeof(int16_t)) {
                 size_t wake_bytes = (size_t)wakeword_get_chunk_samples() * sizeof(int16_t);
                 int16_t *wake_pcm = reinterpret_cast<int16_t *>(audio_buffer);
+                if (wake_ring) {
+                    const size_t chunk = (size_t)wakeword_get_chunk_samples();
+                    for (size_t i = 0; i < chunk; ++i)
+                        wake_ring[(wake_ring_pos + i) % WAKE_RING_SAMPLES] = wake_pcm[i];
+                    wake_ring_pos = (wake_ring_pos + chunk) % WAKE_RING_SAMPLES;
+                    wake_ring_filled += chunk;
+                    if (wake_ring_filled > WAKE_RING_SAMPLES) wake_ring_filled = WAKE_RING_SAMPLES;
+                }
                 detect_calls++;
                 int wake_result = wakeword_detect(wake_pcm);
                 last_wake_result = wake_result;
@@ -390,9 +565,12 @@ static void audio_task(void *arg)
                     ESP_LOGW(TAG, ">>> WAKE WORD TERDETEKSI: HI, ESP (id=%d)", wake_result);
                     display_status("Wakeword terdeteksi");
                     assistant_active = true;
-                    connect_start_us = esp_timer_get_time();
+                    disconnect_wait_start_us = 0;
                     face_set_state(FACE_THINKING);
                     websocket_app_start();
+                    /* Koneksi Gemini berjalan di task lain; sambil menunggu, kenali suara. */
+                    queue_speaker_identification(wake_ring, wake_ring_pos, wake_ring_filled);
+                    wake_ring_filled = 0;
                     buffer_pos = 0;
                     vTaskDelay(pdMS_TO_TICKS(10));
                     continue;
@@ -409,7 +587,6 @@ static void audio_task(void *arg)
                     while (gpio_get_level(BOOT_BUTTON_GPIO) == 0) vTaskDelay(pdMS_TO_TICKS(10));
                     ESP_LOGI(TAG, "Tombol ditekan! Memulai sesi...");
                     assistant_active = true;
-                    connect_start_us = esp_timer_get_time();
                     face_set_state(FACE_THINKING);
                     websocket_app_start();
                 }
@@ -423,22 +600,55 @@ static void audio_task(void *arg)
             tx_backpressure_start_us = 0;
             consecutive_tx_enqueue_failures = 0;
 
-            /* Match RepoV3: the 15-second timeout is measured from session start,
-             * not from the latest disconnect. A disconnect after that window
-             * therefore returns to wake-word mode without another 15-second wait. */
-            if (esp_timer_get_time() - connect_start_us > 15 * 1000000LL) {
-                ESP_LOGW(TAG, "WebSocket tidak pulih dalam 15 detik; akhiri sesi dan kembali ke wake word.");
+            /*
+             * Give the reconnect manager a full 15 seconds after each loss of
+             * connectivity. Measuring from the original session start causes a
+             * healthy long-running session to abandon reconnect immediately
+             * when its transport resets.
+             */
+            const int64_t now_us = esp_timer_get_time();
+            if (disconnect_wait_start_us == 0) disconnect_wait_start_us = now_us;
+            if (now_us - disconnect_wait_start_us > 15 * 1000000LL) {
+                ESP_LOGW(TAG, "WebSocket tidak pulih dalam 15 detik setelah terputus; akhiri sesi dan kembali ke wake word.");
                 display_status("Menunggu wakeword");
                 websocket_request_fresh_session_reset();
                 websocket_disconnect();
                 assistant_active = false;
                 face_set_state(FACE_SLEEP);
                 buffer_pos = 0;
+                disconnect_wait_start_us = 0;
                 continue;
             }
             buffer_pos = 0;
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
+        }
+        disconnect_wait_start_us = 0;
+
+        // Suara dikenal: beri tahu Gemini namanya sekali setelah sesi siap.
+        // Suara tidak dikenal: tidak ada yang dikirim, jadi Gemini tidak menyapa.
+        char speaker_name_to_send[SPEAKER_ID_NAME_MAX + 1] = {};
+        bool has_speaker_name = false;
+        portENTER_CRITICAL(&speaker_context_mux);
+        has_speaker_name = speaker_context_pending;
+        if (has_speaker_name)
+            strlcpy(speaker_name_to_send, speaker_pending_name, sizeof(speaker_name_to_send));
+        portEXIT_CRITICAL(&speaker_context_mux);
+        if (has_speaker_name && websocket_send_speaker_context(speaker_name_to_send)) {
+            portENTER_CRITICAL(&speaker_context_mux);
+            if (speaker_context_pending &&
+                strcmp(speaker_pending_name, speaker_name_to_send) == 0)
+                speaker_context_pending = false;
+            portEXIT_CRITICAL(&speaker_context_mux);
+        }
+        if (alarm_prompt_pending && websocket_is_connected()) {
+            if (websocket_send_alarm_prompt(alarm_prompt_info.hour, alarm_prompt_info.minute,
+                                            alarm_prompt_info.label)) {
+                alarm_prompt_pending = false;
+                standby_pending = true;  // kembali ke standby setelah ucapan alarm selesai diputar
+                standby_requested_us = esp_timer_get_time();
+                ESP_LOGI(TAG, "Prompt alarm terkirim ke Gemini; menunggu audio selesai lalu kembali standby");
+            }
         }
 
         // Gemini Live receives microphone audio continuously while the speaker is idle.
@@ -521,6 +731,12 @@ extern "C" void app_main()
         led_wifi_config_mode = true;
         led_boot_phase = false;
         display_status("Config Mode");
+        // Halaman Profil Suara (/voice): perlu mic dan penyimpanan.
+        // Mic dimatikan dulu; hanya dinyalakan sebentar saat merekam.
+        audio_hal_init();
+        audio_hal_set_mic_enabled(false);
+        if (speaker_id_init()) web_config_set_extra_handlers(speaker_id_web_register);
+        else ESP_LOGW(TAG, "speaker_id gagal init; halaman Profil Suara tidak aktif");
         web_config_start();
         while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -530,6 +746,8 @@ extern "C" void app_main()
     // SPIFFS formatting may temporarily stall flash/cache execution; keep OLED2
     // animation tasks unstarted until storage initialization has completed.
     if (!ai_memory_init()) ESP_LOGW(TAG, "Memori lokal belum siap; fitur catatan akan gagal sampai penyimpanan pulih");
+    // Muat profil suara (PSRAM + SPIFFS). Gagal bukan masalah: robot tetap jalan tanpa sapaan nama.
+    if (!speaker_id_init()) ESP_LOGW(TAG, "speaker_id tidak aktif; robot tidak akan menyapa dengan nama");
 
     oled_init(); face_animation_start(); face_set_state(FACE_SLEEP); display_status("Booting...");
     audio_hal_init(); audio_i2s_test_tone();
@@ -543,9 +761,15 @@ extern "C" void app_main()
 
     display_status("Menghubungkan WiFi...");
     wifi_init_sta();
-    if (!wifi_wait_for_connection(15000)) { ESP_LOGE(TAG, "Wi-Fi tidak mendapatkan IP."); display_status("WiFi Gagal!"); face_set_state(FACE_SLEEP); while (1) vTaskDelay(pdMS_TO_TICKS(1000)); }
+    if (!wifi_wait_for_connection(15000)) {
+        ESP_LOGE(TAG, "Wi-Fi tidak mendapatkan IP. Restart dalam 5 detik untuk mencoba lagi.");
+        display_status("WiFi Gagal!");
+        face_set_state(FACE_SLEEP);
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        esp_restart();
+    }
 
-    esp_wifi_set_ps(WIFI_PS_NONE); ESP_LOGI(TAG, "WiFi power save dimatikan"); ESP_LOGI(TAG, "WIFI READY - lanjut ke NTP"); sync_sntp_time(); ESP_LOGI(TAG, "Menunggu 1 detik..."); vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_wifi_set_ps(WIFI_PS_NONE); ESP_LOGI(TAG, "WiFi power save dimatikan"); ESP_LOGI(TAG, "WIFI READY - lanjut ke NTP"); bool ntp_time_synced = sync_sntp_time(); alarm_set_time_ready(ntp_time_synced); if (!alarm_init()) ESP_LOGW(TAG, "Alarm NVS belum siap; fitur alarm mungkin belum bisa digunakan"); ESP_LOGI(TAG, "Menunggu 1 detik..."); vTaskDelay(pdMS_TO_TICKS(1000));
     debug_network_path(); vTaskDelay(pdMS_TO_TICKS(1000)); face_set_state(FACE_SLEEP); display_status("Sistem siap. Katakan Hi, ESP...");
 
     BaseType_t task_result = xTaskCreate(audio_task, "audio_task", 10240, NULL, 5, NULL); if (task_result != pdPASS) ESP_LOGE(TAG, "Gagal membuat audio_task!"); else ESP_LOGI(TAG, "audio_task berhasil dimulai.");

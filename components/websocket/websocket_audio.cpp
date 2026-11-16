@@ -17,6 +17,15 @@
 static const char *TAG = "WS_AUDIO";
 extern "C" void oled2_face_set_speaker_level(uint8_t level);
 static volatile bool audio_clear_pending = false;
+/* Hold microphone uplink during web search/tool handoff without disabling I2S capture. */
+volatile bool websocket_mic_uplink_paused = false;
+
+void websocket_set_mic_uplink_paused(bool paused)
+{
+    if (websocket_mic_uplink_paused == paused) return;
+    websocket_mic_uplink_paused = paused;
+    ESP_LOGI(TAG, "MIC uplink %s (capture tetap aktif; frame selama jeda dibuang)", paused ? "PAUSED" : "RESUMED");
+}
 static StaticSemaphore_t audio_send_mutex_storage;
 static SemaphoreHandle_t audio_send_mutex = NULL;
 #define AUDIO_OUTPUT_SAMPLE_RATE 24000U
@@ -26,6 +35,10 @@ static SemaphoreHandle_t audio_send_mutex = NULL;
 #define AUDIO_PLAYBACK_RESUME_SIZE (4 * 1024)
 #define AUDIO_PLAYBACK_READ_SIZE 2048
 #define AUDIO_PLAYBACK_READ_WAIT_MS 5
+/* Jika audio berhenti di tengah turn dan Gemini tidak kunjung mengirim turnComplete,
+ * paksa selesai setelah waktu ini agar mikrofon dibuka lagi (kalau tidak, uplink mati
+ * dan Gemini menutup koneksi karena idle). */
+#define AUDIO_UNDERRUN_TIMEOUT_US (8LL * 1000000LL)
 #define AUDIO_PLAYBACK_TRIGGER_SIZE 1024
 #define AUDIO_SEND_CHUNK_SIZE 512
 #define AUDIO_SEND_WAIT_MS 50
@@ -83,6 +96,7 @@ void check_audio_playback_complete(void)
     const int64_t balance = (int64_t)audio_bytes_received - (int64_t)accounted;
     ESP_LOGI(TAG, "AUDIO PLAYBACK COMPLETE: received=%llu queued=%llu played=%llu pending=0 queue_dropped=%llu i2s_dropped=%llu balance=%lld", (unsigned long long)audio_bytes_received, (unsigned long long)audio_bytes_queued, (unsigned long long)audio_bytes_played, (unsigned long long)audio_bytes_dropped, (unsigned long long)audio_bytes_playback_dropped, (long long)balance);
     audio_playback_complete_event = true;
+    websocket_set_mic_uplink_paused(false);
     oled2_face_set_speaker_level(0);
     servo_head_set_speaking(false);
     face_set_speech_level(0);
@@ -95,6 +109,7 @@ static void audio_playback_task(void *arg)
     bool playback_started = false;
     bool playback_started_once = false;
     bool underrun_reported = false;
+    int64_t underrun_since_us = 0;
     uint32_t playback_generation = 0;
     int64_t last_stats_us = 0;
     ESP_LOGI(TAG, "Audio playback task: 24kHz PCM16 mono, ring=%u, prebuffer=%u, core=%d priority=3", (unsigned)AUDIO_RING_BUFFER_SIZE, (unsigned)AUDIO_PLAYBACK_PREBUFFER_SIZE, xPortGetCoreID());
@@ -114,10 +129,12 @@ static void audio_playback_task(void *arg)
             } else if (audio_stream != NULL) xStreamBufferReset(audio_stream);
             audio_turn_complete_pending = false;
             audio_turn_active = false;
+            websocket_set_mic_uplink_paused(false);
             audio_hal_set_mic_enabled(true);
             playback_started = false;
             playback_started_once = false;
             underrun_reported = false;
+            underrun_since_us = 0;
             playback_generation = audio_turn_generation;
         }
         uint32_t current_generation = audio_turn_generation;
@@ -126,15 +143,28 @@ static void audio_playback_task(void *arg)
             playback_started = false;
             playback_started_once = false;
             underrun_reported = false;
+            underrun_since_us = 0;
         }
         if (audio_stream == NULL) { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
         size_t pending = xStreamBufferBytesAvailable(audio_stream);
         const size_t start_threshold = playback_started_once ? AUDIO_PLAYBACK_RESUME_SIZE : AUDIO_PLAYBACK_PREBUFFER_SIZE;
-        if (!playback_started && pending < start_threshold && audio_turn_active && !audio_turn_complete_pending) { vTaskDelay(1); continue; }
+        if (!playback_started && pending < start_threshold && audio_turn_active && !audio_turn_complete_pending) {
+            if (playback_started_once && underrun_since_us != 0 &&
+                esp_timer_get_time() - underrun_since_us > AUDIO_UNDERRUN_TIMEOUT_US) {
+                ESP_LOGW(TAG, "AUDIO WATCHDOG: tidak ada audio baru >8 detik dan turnComplete belum datang; paksa selesai agar mikrofon dibuka");
+                underrun_since_us = 0;
+                audio_turn_complete_pending = true;   /* sisa audio (jika ada) diputar, lalu mic ON */
+                check_audio_playback_complete();
+                continue;
+            }
+            vTaskDelay(1);
+            continue;
+        }
         if (playback_started && pending == 0 && audio_turn_active && !audio_turn_complete_pending) {
             if (!underrun_reported) {
                 ESP_LOGW(TAG, "AUDIO PLAYBACK UNDERRUN: PCM buffer kosong di tengah turn - rebuffer");
                 underrun_reported = true;
+                underrun_since_us = esp_timer_get_time();
             }
             playback_started = false;
             vTaskDelay(pdMS_TO_TICKS(AUDIO_PLAYBACK_READ_WAIT_MS));
@@ -146,6 +176,7 @@ static void audio_playback_task(void *arg)
         if (received == 0) { vTaskDelay(1); continue; }
         if (!playback_started) { playback_started = true; playback_started_once = true; audio_hal_set_mic_enabled(false); servo_head_set_speaking(true); face_set_state(FACE_SPEAKING); }
         underrun_reported = false;
+        underrun_since_us = 0;
 
         // Estimate the outgoing voice level from the same PCM chunk sent to I2S.
         // This keeps the mouth synchronized to actual synthesized audio, not a timer.
@@ -178,7 +209,7 @@ static void audio_playback_task(void *arg)
             last_stats_us = now_us;
             ESP_LOGI(TAG, "AUDIO FLOW: pending=%u/%u received=%llu queued=%llu played=%llu queue_dropped=%llu i2s_dropped=%llu", (unsigned)xStreamBufferBytesAvailable(audio_stream), (unsigned)AUDIO_RING_BUFFER_SIZE, (unsigned long long)audio_bytes_received, (unsigned long long)audio_bytes_queued, (unsigned long long)audio_bytes_played, (unsigned long long)audio_bytes_dropped, (unsigned long long)audio_bytes_playback_dropped);
         }
-        if (!audio_turn_active && xStreamBufferBytesAvailable(audio_stream) == 0) { playback_started = false; playback_started_once = false; underrun_reported = false; }
+        if (!audio_turn_active && xStreamBufferBytesAvailable(audio_stream) == 0) { playback_started = false; playback_started_once = false; underrun_reported = false; underrun_since_us = 0; }
     }
 }
 bool start_audio_playback(void)
@@ -224,6 +255,7 @@ void clear_audio_buffer(void)
     }
     audio_turn_complete_pending = false;
     audio_turn_active = false;
+    websocket_set_mic_uplink_paused(false);
     audio_hal_set_mic_enabled(true);
     face_set_speech_level(0);
     oled2_face_set_speaker_level(0);

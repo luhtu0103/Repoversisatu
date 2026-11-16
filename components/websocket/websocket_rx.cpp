@@ -50,7 +50,7 @@ static size_t rx_drop_payload_len = 0;
 static size_t rx_drop_received = 0;
 
 #define RX_AUDIO_CHUNK_SIZE 1024
-#define RX_AUDIO_QUEUE_LENGTH 16
+#define RX_AUDIO_QUEUE_LENGTH 24
 typedef struct { uint32_t generation; uint16_t len; uint8_t pcm[RX_AUDIO_CHUNK_SIZE]; } rx_audio_chunk_t;
 static QueueHandle_t rx_audio_queue = NULL;
 static QueueHandle_t rx_audio_free_queue = NULL;
@@ -177,7 +177,7 @@ static bool preallocate_rx_slots(void)
 
     // Semua slot 8 KB â cukup untuk compact JSON dan payload kecil
     for (int i = 0; i < WS_RX_SLOT_COUNT; ++i) {
-        if (!allocate_persistent_slot(i, 8 * 1024)) {
+        if (!allocate_persistent_slot(i, WS_RX_STREAM_COMPACT_SIZE)) {
             ESP_LOGE(TAG, "Prealokasi slot gagal: slot=%d", i);
             return false;
         }
@@ -185,7 +185,7 @@ static bool preallocate_rx_slots(void)
     }
 
     rx_slots_preallocated = true;
-    ESP_LOGI(TAG, "Prealokasi RX slot selesai: %dx8KB", (unsigned)WS_RX_SLOT_COUNT);
+    ESP_LOGI(TAG, "Prealokasi RX slot selesai: %dx12KB", (unsigned)WS_RX_SLOT_COUNT);
     return true;
 }
 

@@ -11,6 +11,8 @@ extern "C" {
 void uart_control_init(void);
 void uart_control_send(const char *cmd);
 void uart_control_send_history(const char *role, const char *text);
+// Send web-search results to the secondary DevKit using WSRCH framed lines.
+void uart_control_send_web_search(const char *text);
 int uart_control_read(char *buf, size_t max_len);
 
 // Validate and execute one Gemini device command over UART.

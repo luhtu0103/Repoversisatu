@@ -6,6 +6,10 @@
 extern "C" {
 #endif
 
+/* Batas total teks semua catatan saat dikirim ke Gemini.
+ * Harus lebih kecil dari buffer di websocket_json.cpp (4096). */
+#define AI_MEMORY_CONTEXT_MAX 4000
+
 bool ai_memory_init(void);
 bool ai_memory_save(const char *key, const char *value);
 int ai_memory_delete_target(const char *target, char *detail, size_t detail_size);

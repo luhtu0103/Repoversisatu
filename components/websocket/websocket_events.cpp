@@ -111,6 +111,9 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
             /* Only mark cleanup pending. The websocket callback must never
              * close, abort, or destroy its own client. */
             websocket_cleanup_pending = true;
+            /* Recover even if the transport reports ERROR without a later
+             * DISCONNECTED event. Cleanup/stop remains owned by the manager task. */
+            websocket_request_resume_reconnect();
             break;
 
         case WEBSOCKET_EVENT_DISCONNECTED:
