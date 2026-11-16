@@ -221,10 +221,12 @@ constexpr size_t WAKE_RING_SAMPLES = 24000;
 static char speaker_pending_name[SPEAKER_ID_NAME_MAX + 1] = {};
 static bool speaker_context_pending = false;
 static portMUX_TYPE speaker_context_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint32_t speaker_session_seq = 0;  // naik tiap sesi berakhir
 
 typedef struct {
     size_t samples;
     int16_t *pcm;
+    uint32_t seq;
 } speaker_id_job_t;
 
 static QueueHandle_t speaker_id_queue = nullptr;
@@ -239,11 +241,16 @@ static void speaker_id_worker_task(void *arg)
         speaker_id_result_t result = {};
         const speaker_id_status_t st = speaker_id_identify(job->pcm, job->samples, &result);
         if (st == SPEAKER_ID_OK && result.known) {
+            bool accepted = false;
             portENTER_CRITICAL(&speaker_context_mux);
-            strlcpy(speaker_pending_name, result.name, sizeof(speaker_pending_name));
-            speaker_context_pending = true;
+            if (job->seq == speaker_session_seq) {
+                strlcpy(speaker_pending_name, result.name, sizeof(speaker_pending_name));
+                speaker_context_pending = true;
+                accepted = true;
+            }
             portEXIT_CRITICAL(&speaker_context_mux);
-            ESP_LOGI(TAG, "Pembicara dikenal: %s", result.name);
+            if (accepted) ESP_LOGI(TAG, "Pembicara dikenal: %s", result.name);
+            else ESP_LOGW(TAG, "Hasil Speaker ID dibuang (sesi sudah berakhir): %s", result.name);
         } else if (st == SPEAKER_ID_OK) {
             ESP_LOGI(TAG, "Pembicara tidak dikenal; Gemini tidak diberi nama (tidak disapa)");
         } else {
@@ -278,6 +285,7 @@ static void queue_speaker_identification(const int16_t *ring, size_t ring_pos, s
     for (size_t i = 0; i < ring_filled; ++i)
         job->pcm[i] = ring[(start + i) % WAKE_RING_SAMPLES];
     job->samples = ring_filled;
+    job->seq = speaker_session_seq;
 
     if (xQueueSend(speaker_id_queue, &job, 0) != pdTRUE) {
         heap_caps_free(job->pcm);
@@ -510,6 +518,7 @@ static void audio_task(void *arg)
         if (!assistant_active) {
             portENTER_CRITICAL(&speaker_context_mux);
             speaker_context_pending = false;  // sesi lama selesai; jangan bawa nama ke sesi berikutnya
+            speaker_session_seq++;            // hasil worker yang terlambat jadi basi
             portEXIT_CRITICAL(&speaker_context_mux);
             // Wait for the previous WebSocket client to be destroyed before
             // detecting another wake word and starting a fresh Gemini session.
