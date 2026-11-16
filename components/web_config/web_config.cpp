@@ -24,6 +24,9 @@ static const char *TAG = "WEB_CONFIG";
 #define CONFIG_BOOT_BUTTON_GPIO GPIO_NUM_0
 #define CONFIG_LONG_PRESS_MS 2000
 
+/* Halaman tambahan (mis. /voice) yang didaftarkan modul lain. */
+static web_config_extra_handlers_t s_extra_handlers = NULL;
+
 static const char *HTML_FORM = R"rawliteral(
 <!DOCTYPE html>
 <html>
@@ -50,6 +53,7 @@ static const char *HTML_FORM = R"rawliteral(
   <textarea name="role_text" rows="6" maxlength="2047" placeholder="Nama saya Bima, suka kopi pahit... (maks. 2047 byte UTF-8)"></textarea>
   <button type="submit">Simpan & Restart</button>
 </form>
+<p><a href="/voice" style="color:#a5b4fc">Profil Suara (daftarkan suara)</a></p>
 </body>
 </html>
 )rawliteral";
@@ -400,6 +404,7 @@ void web_config_start(void)
     server_cfg.server_port = 80;
     server_cfg.stack_size = 12288;
     server_cfg.task_priority = 6;
+    server_cfg.max_uri_handlers = 16;
 
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &server_cfg) == ESP_OK) {
@@ -418,6 +423,7 @@ void web_config_start(void)
             .user_ctx = NULL
         };
         httpd_register_uri_handler(server, &save_uri);
+        if (s_extra_handlers) s_extra_handlers((void *)server);
         ESP_LOGI(TAG, "Web config server berjalan di http://192.168.4.1");
     } else {
         ESP_LOGE(TAG, "Gagal start HTTP server");
@@ -453,6 +459,11 @@ bool web_config_load_wifi(char *ssid, size_t ssid_len,
 bool web_config_load_api_key(char *api_key, size_t max_len)
 {
     return nvs_get_str_safe(KEY_API_KEY, api_key, max_len);
+}
+
+void web_config_set_extra_handlers(web_config_extra_handlers_t callback)
+{
+    s_extra_handlers = callback;
 }
 
 void web_config_force_reset(void)
