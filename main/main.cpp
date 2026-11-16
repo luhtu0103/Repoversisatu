@@ -347,7 +347,7 @@ static void audio_task(void *arg)
         speaker_id_queue = xQueueCreate(1, sizeof(speaker_id_job_t *));
         if (speaker_id_queue) {
             BaseType_t worker_result = xTaskCreatePinnedToCore(
-                speaker_id_worker_task, "speaker_id", 6144, nullptr, 3, nullptr, 0);
+                speaker_id_worker_task, "speaker_id", 6144, nullptr, 2, nullptr, 1);
             if (worker_result != pdPASS) {
                 vQueueDelete(speaker_id_queue);
                 speaker_id_queue = nullptr;
