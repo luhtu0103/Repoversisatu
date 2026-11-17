@@ -79,6 +79,58 @@ bool speaker_id_delete(const char *name);
 /* Rekam dari mikrofon robot (jalur mentah yang sama dengan wake word). */
 size_t speaker_id_record(int16_t *dest, size_t max_samples, uint32_t timeout_ms);
 
+/* ================= Kata harian (dikenali di tengah obrolan) =================
+ *
+ * Pendaftaran : tiap kata diucapkan SPEAKER_WORD_SAMPLES kali lewat halaman /voice.
+ * Saat ngobrol: ucapan terakhir dicari apakah memuat salah satu kata terdaftar
+ *               (DTW subsequence). Jika cocok -> pembicara dikenali.
+ * Rekaman pakai jalur mikrofon yang SAMA dengan percakapan (audio_read_mic).
+ */
+#define SPEAKER_WORD_MAX_PER_PROFILE 16
+#define SPEAKER_WORD_SAMPLES         2
+#define SPEAKER_WORD_NAME_MAX        15
+
+typedef struct {
+    char  name[SPEAKER_ID_NAME_MAX + 1];
+    char  word[SPEAKER_WORD_NAME_MAX + 1];  /* kata terbaik milik profil ini */
+    float ratio;                            /* makin kecil makin mirip */
+} speaker_word_score_t;
+
+typedef struct {
+    bool known;
+    bool ambiguous;
+    char name[SPEAKER_ID_NAME_MAX + 1];
+    char word[SPEAKER_WORD_NAME_MAX + 1];
+    float ratio;
+    int  score_count;
+    speaker_word_score_t scores[SPEAKER_ID_MAX_PROFILES];
+} speaker_word_result_t;
+
+bool  speaker_id_has_words(void);
+int   speaker_id_word_profile_count(void);
+/* Ambil nama profil ke-index dan jumlah katanya. */
+bool  speaker_id_word_get_profile(int index, char *name, size_t name_size, int *word_count);
+/* Ambil kata ke-widx milik profil ke-pidx. */
+bool  speaker_id_word_get_word(int pidx, int widx, char *word, size_t word_size);
+
+float speaker_id_word_get_tolerance(void);
+bool  speaker_id_word_set_tolerance(float tolerance);
+
+/* Cari kata terdaftar di dalam ucapan (PCM16 mono 16 kHz, maks 3 detik terakhir dipakai). */
+speaker_id_status_t speaker_id_word_identify(const int16_t *pcm, size_t samples,
+                                             speaker_word_result_t *out);
+
+/* step=1 memulai kata baru; setelah rekaman ke-SPEAKER_WORD_SAMPLES kata tersimpan. */
+speaker_id_status_t speaker_id_word_enroll(const char *name, const char *word, int step,
+                                           const int16_t *pcm, size_t samples,
+                                           int *count_out, bool *done_out);
+
+/* word == NULL -> hapus semua kata milik name. */
+bool  speaker_id_word_delete(const char *name, const char *word);
+
+/* Rekam lewat jalur mikrofon percakapan (AFE). Jika kosong, jatuh ke jalur mentah. */
+size_t speaker_id_record_conv(int16_t *dest, size_t max_samples, uint32_t timeout_ms);
+
 /* Daftarkan halaman /voice ke HTTP server web_config. handle = httpd_handle_t. */
 void speaker_id_web_register(void *httpd_handle);
 
