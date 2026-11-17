@@ -224,13 +224,15 @@ static portMUX_TYPE speaker_context_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint32_t speaker_session_seq = 0;  // naik tiap sesi berakhir
 static char speaker_current_name[SPEAKER_ID_NAME_MAX + 1] = {};  // nama yang sudah diberitahukan ke Gemini
 static char speaker_change_name[SPEAKER_ID_NAME_MAX + 1] = {};
+static char speaker_candidate_name[SPEAKER_ID_NAME_MAX + 1] = {};  // calon pembicara baru (perlu 2x cocok berturut-turut)
+static int speaker_candidate_count = 0;
 static bool speaker_change_pending = false;
 
 typedef struct {
     size_t samples;
     int16_t *pcm;
     uint32_t seq;
-    uint8_t kind;   // 0 = Hi ESP (MFCC+DTW), 1 = kata harian saat ngobrol
+    uint8_t kind;   // 0 = Hi ESP (MFCC+DTW), 1 = warna suara saat ngobrol
 } speaker_id_job_t;
 
 static QueueHandle_t speaker_id_queue = nullptr;
@@ -243,20 +245,35 @@ static void speaker_id_worker_task(void *arg)
         if (xQueueReceive(speaker_id_queue, &job, portMAX_DELAY) != pdTRUE || !job) continue;
 
         if (job->kind == 1) {
-            speaker_word_result_t wr = {};
-            const speaker_id_status_t wst = speaker_id_word_identify(job->pcm, job->samples, &wr);
-            if (wst == SPEAKER_ID_OK && wr.known) {
+            speaker_vp_result_t vr = {};
+            const speaker_id_status_t vst = speaker_vp_identify(job->pcm, job->samples, &vr);
+            if (vst == SPEAKER_ID_OK && vr.known) {
                 bool changed = false;
                 portENTER_CRITICAL(&speaker_context_mux);
-                if (job->seq == speaker_session_seq && strcmp(wr.name, speaker_current_name) != 0) {
-                    strlcpy(speaker_change_name, wr.name, sizeof(speaker_change_name));
-                    speaker_change_pending = true;
-                    changed = true;
+                if (job->seq == speaker_session_seq) {
+                    if (strcmp(vr.name, speaker_current_name) == 0) {
+                        speaker_candidate_count = 0;          // sama dengan yang sudah diberitahukan
+                        speaker_candidate_name[0] = '\0';
+                    } else {
+                        if (strcmp(vr.name, speaker_candidate_name) == 0) {
+                            ++speaker_candidate_count;
+                        } else {
+                            strlcpy(speaker_candidate_name, vr.name, sizeof(speaker_candidate_name));
+                            speaker_candidate_count = 1;
+                        }
+                        if (speaker_candidate_count >= 2) {   // 2 ucapan berturut-turut -> yakin
+                            strlcpy(speaker_change_name, vr.name, sizeof(speaker_change_name));
+                            speaker_change_pending = true;
+                            speaker_candidate_count = 0;
+                            speaker_candidate_name[0] = '\0';
+                            changed = true;
+                        }
+                    }
                 }
                 portEXIT_CRITICAL(&speaker_context_mux);
-                if (changed) ESP_LOGI(TAG, "Kata harian mengenali pembicara: %s (kata '%s')", wr.name, wr.word);
-            } else if (wst != SPEAKER_ID_OK) {
-                ESP_LOGD(TAG, "Kata harian dilewati: %s", speaker_id_status_text(wst));
+                if (changed) ESP_LOGI(TAG, "Warna suara mengenali pembicara: %s", vr.name);
+            } else if (vst != SPEAKER_ID_OK) {
+                ESP_LOGD(TAG, "Warna suara dilewati: %s", speaker_id_status_text(vst));
             }
             heap_caps_free(job->pcm);
             heap_caps_free(job);
@@ -323,7 +340,7 @@ static void queue_speaker_identification(const int16_t *ring, size_t ring_pos, s
     }
 }
 
-/* ---- Kata harian: potong ucapan pengguna saat ngobrol, kirim ke worker ---- */
+/* ---- Warna suara: potong ucapan pengguna saat ngobrol, kirim ke worker ---- */
 constexpr size_t UTT_RING_SAMPLES = 48000;        // 3 detik
 constexpr size_t UTT_END_SILENCE_SAMPLES = 6400;  // 0,4 detik diam = ucapan selesai
 constexpr size_t UTT_MIN_VOICED_SAMPLES = 6400;   // minimal 0,4 detik suara
@@ -346,7 +363,7 @@ static void utt_reset(void)
 
 static void queue_word_identification(size_t len)
 {
-    if (!utt_ring || !speaker_id_queue || len < 4000) return;
+    if (!utt_ring || !speaker_id_queue || len < 6400) return;
     speaker_id_job_t *job = (speaker_id_job_t *)heap_caps_malloc(
         sizeof(speaker_id_job_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!job) return;
@@ -365,7 +382,7 @@ static void queue_word_identification(size_t len)
 
 static void utterance_feed(const int16_t *s, size_t n, bool voice)
 {
-    if (!speaker_id_has_words() || !speaker_id_queue || n == 0) return;
+    if (!speaker_vp_has_profiles() || !speaker_id_queue || n == 0) return;
     if (!utt_ring) {
         utt_ring = (int16_t *)heap_caps_calloc(UTT_RING_SAMPLES, sizeof(int16_t),
                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -624,9 +641,11 @@ static void audio_task(void *arg)
         if (!assistant_active) {
             portENTER_CRITICAL(&speaker_context_mux);
             speaker_context_pending = false;  // sesi lama selesai; jangan bawa nama ke sesi berikutnya
-            speaker_session_seq = speaker_session_seq + 1; // hasil worker yang terlambat jadi basi
+            speaker_session_seq++;            // hasil worker yang terlambat jadi basi
             speaker_change_pending = false;
             speaker_current_name[0] = '\0';
+            speaker_candidate_name[0] = '\0';
+            speaker_candidate_count = 0;
             utt_reset();
             portEXIT_CRITICAL(&speaker_context_mux);
             // Wait for the previous WebSocket client to be destroyed before
@@ -752,12 +771,16 @@ static void audio_task(void *arg)
             }
             portEXIT_CRITICAL(&speaker_context_mux);
         }
-        // Pembicara baru dikenali di tengah obrolan (kata harian): beri tahu Gemini tanpa menyapa ulang.
+        // Pembicara baru dikenali di tengah obrolan (warna suara): beri tahu Gemini tanpa menyapa ulang.
         if (!has_speaker_name) {
             char change_name[SPEAKER_ID_NAME_MAX + 1] = {};
             bool has_change = false;
             portENTER_CRITICAL(&speaker_context_mux);
             has_change = speaker_change_pending;
+            if (has_change && strcmp(speaker_change_name, speaker_current_name) == 0) {
+                speaker_change_pending = false;   // sudah diberitahukan (mis. lewat sapaan Hi ESP)
+                has_change = false;
+            }
             if (has_change) strlcpy(change_name, speaker_change_name, sizeof(change_name));
             portEXIT_CRITICAL(&speaker_context_mux);
             if (has_change && websocket_send_speaker_update(change_name)) {
