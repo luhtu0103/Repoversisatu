@@ -2,9 +2,15 @@ name: ESP32-S3 firmware
 
 on:
   push:
-    branches: main
+    branches:
+      - main
+      - feature/free-web-search
+      - pengenalan-suara
   pull_request:
-    branches: main
+    branches:
+      - main
+      - feature/free-web-search
+      - pengenalan-suara
   workflow_dispatch:
 
 permissions:
