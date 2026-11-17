@@ -222,11 +222,15 @@ static char speaker_pending_name[SPEAKER_ID_NAME_MAX + 1] = {};
 static bool speaker_context_pending = false;
 static portMUX_TYPE speaker_context_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint32_t speaker_session_seq = 0;  // naik tiap sesi berakhir
+static char speaker_current_name[SPEAKER_ID_NAME_MAX + 1] = {};  // nama yang sudah diberitahukan ke Gemini
+static char speaker_change_name[SPEAKER_ID_NAME_MAX + 1] = {};
+static bool speaker_change_pending = false;
 
 typedef struct {
     size_t samples;
     int16_t *pcm;
     uint32_t seq;
+    uint8_t kind;   // 0 = Hi ESP (MFCC+DTW), 1 = kata harian saat ngobrol
 } speaker_id_job_t;
 
 static QueueHandle_t speaker_id_queue = nullptr;
@@ -237,6 +241,27 @@ static void speaker_id_worker_task(void *arg)
     for (;;) {
         speaker_id_job_t *job = nullptr;
         if (xQueueReceive(speaker_id_queue, &job, portMAX_DELAY) != pdTRUE || !job) continue;
+
+        if (job->kind == 1) {
+            speaker_word_result_t wr = {};
+            const speaker_id_status_t wst = speaker_id_word_identify(job->pcm, job->samples, &wr);
+            if (wst == SPEAKER_ID_OK && wr.known) {
+                bool changed = false;
+                portENTER_CRITICAL(&speaker_context_mux);
+                if (job->seq == speaker_session_seq && strcmp(wr.name, speaker_current_name) != 0) {
+                    strlcpy(speaker_change_name, wr.name, sizeof(speaker_change_name));
+                    speaker_change_pending = true;
+                    changed = true;
+                }
+                portEXIT_CRITICAL(&speaker_context_mux);
+                if (changed) ESP_LOGI(TAG, "Kata harian mengenali pembicara: %s (kata '%s')", wr.name, wr.word);
+            } else if (wst != SPEAKER_ID_OK) {
+                ESP_LOGD(TAG, "Kata harian dilewati: %s", speaker_id_status_text(wst));
+            }
+            heap_caps_free(job->pcm);
+            heap_caps_free(job);
+            continue;
+        }
 
         speaker_id_result_t result = {};
         const speaker_id_status_t st = speaker_id_identify(job->pcm, job->samples, &result);
@@ -286,6 +311,7 @@ static void queue_speaker_identification(const int16_t *ring, size_t ring_pos, s
         job->pcm[i] = ring[(start + i) % WAKE_RING_SAMPLES];
     job->samples = ring_filled;
     job->seq = speaker_session_seq;
+    job->kind = 0;
 
     if (xQueueSend(speaker_id_queue, &job, 0) != pdTRUE) {
         heap_caps_free(job->pcm);
@@ -294,6 +320,85 @@ static void queue_speaker_identification(const int16_t *ring, size_t ring_pos, s
     } else {
         ESP_LOGI(TAG, "Snapshot Speaker ID dikirim ke worker: %u sampel",
                  (unsigned)ring_filled);
+    }
+}
+
+/* ---- Kata harian: potong ucapan pengguna saat ngobrol, kirim ke worker ---- */
+constexpr size_t UTT_RING_SAMPLES = 48000;        // 3 detik
+constexpr size_t UTT_END_SILENCE_SAMPLES = 6400;  // 0,4 detik diam = ucapan selesai
+constexpr size_t UTT_MIN_VOICED_SAMPLES = 6400;   // minimal 0,4 detik suara
+static int16_t *utt_ring = nullptr;
+static size_t utt_pos = 0;
+static uint64_t utt_total = 0;
+static uint64_t utt_begin = 0;
+static bool utt_active = false;
+static size_t utt_voiced = 0;
+static size_t utt_silence = 0;
+
+static void utt_reset(void)
+{
+    utt_pos = 0;
+    utt_total = 0;
+    utt_active = false;
+    utt_voiced = 0;
+    utt_silence = 0;
+}
+
+static void queue_word_identification(size_t len)
+{
+    if (!utt_ring || !speaker_id_queue || len < 4000) return;
+    speaker_id_job_t *job = (speaker_id_job_t *)heap_caps_malloc(
+        sizeof(speaker_id_job_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!job) return;
+    job->pcm = (int16_t *)heap_caps_malloc(len * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!job->pcm) { heap_caps_free(job); return; }
+    const size_t start = (utt_pos + UTT_RING_SAMPLES - len) % UTT_RING_SAMPLES;
+    for (size_t i = 0; i < len; ++i) job->pcm[i] = utt_ring[(start + i) % UTT_RING_SAMPLES];
+    job->samples = len;
+    job->seq = speaker_session_seq;
+    job->kind = 1;
+    if (xQueueSend(speaker_id_queue, &job, 0) != pdTRUE) {
+        heap_caps_free(job->pcm);
+        heap_caps_free(job);   // worker masih sibuk: lewati ucapan ini
+    }
+}
+
+static void utterance_feed(const int16_t *s, size_t n, bool voice)
+{
+    if (!speaker_id_has_words() || !speaker_id_queue || n == 0) return;
+    if (!utt_ring) {
+        utt_ring = (int16_t *)heap_caps_calloc(UTT_RING_SAMPLES, sizeof(int16_t),
+                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!utt_ring) return;
+    }
+    for (size_t i = 0; i < n; ++i) utt_ring[(utt_pos + i) % UTT_RING_SAMPLES] = s[i];
+    utt_pos = (utt_pos + n) % UTT_RING_SAMPLES;
+    utt_total += n;
+
+    if (voice) {
+        if (!utt_active) {
+            utt_active = true;
+            utt_begin = utt_total - n;
+            utt_voiced = 0;
+        }
+        utt_voiced += n;
+        utt_silence = 0;
+    } else if (utt_active) {
+        utt_silence += n;
+    }
+    if (!utt_active) return;
+
+    const uint64_t length = utt_total - utt_begin;
+    if (utt_silence >= UTT_END_SILENCE_SAMPLES || length >= UTT_RING_SAMPLES) {
+        if (utt_voiced >= UTT_MIN_VOICED_SAMPLES) {
+            size_t len = (size_t)length + 3200;               // sedikit awalan
+            if (len > UTT_RING_SAMPLES) len = UTT_RING_SAMPLES;
+            if (len > utt_total) len = (size_t)utt_total;
+            queue_word_identification(len);
+        }
+        utt_active = false;
+        utt_voiced = 0;
+        utt_silence = 0;
     }
 }
 
@@ -510,6 +615,7 @@ static void audio_task(void *arg)
                 }
                 const uint32_t mean_energy = (uint32_t)(energy_sum / sample_count);
                 mic_voice_detected = mean_energy > AUDIO_VOICE_ENERGY_THRESHOLD_SQ;
+                utterance_feed(samples, sample_count, mean_energy > AUDIO_VOICE_ENERGY_THRESHOLD_SQ / 4);
             } else {
                 mic_voice_detected = false;
             }
@@ -518,7 +624,10 @@ static void audio_task(void *arg)
         if (!assistant_active) {
             portENTER_CRITICAL(&speaker_context_mux);
             speaker_context_pending = false;  // sesi lama selesai; jangan bawa nama ke sesi berikutnya
-            speaker_session_seq = speaker_session_seq + 1;  // hasil worker yang terlambat jadi basi
+            speaker_session_seq++;            // hasil worker yang terlambat jadi basi
+            speaker_change_pending = false;
+            speaker_current_name[0] = '\0';
+            utt_reset();
             portEXIT_CRITICAL(&speaker_context_mux);
             // Wait for the previous WebSocket client to be destroyed before
             // detecting another wake word and starting a fresh Gemini session.
@@ -637,9 +746,28 @@ static void audio_task(void *arg)
         if (has_speaker_name && websocket_send_speaker_context(speaker_name_to_send)) {
             portENTER_CRITICAL(&speaker_context_mux);
             if (speaker_context_pending &&
-                strcmp(speaker_pending_name, speaker_name_to_send) == 0)
+                strcmp(speaker_pending_name, speaker_name_to_send) == 0) {
                 speaker_context_pending = false;
+                strlcpy(speaker_current_name, speaker_name_to_send, sizeof(speaker_current_name));
+            }
             portEXIT_CRITICAL(&speaker_context_mux);
+        }
+        // Pembicara baru dikenali di tengah obrolan (kata harian): beri tahu Gemini tanpa menyapa ulang.
+        if (!has_speaker_name) {
+            char change_name[SPEAKER_ID_NAME_MAX + 1] = {};
+            bool has_change = false;
+            portENTER_CRITICAL(&speaker_context_mux);
+            has_change = speaker_change_pending;
+            if (has_change) strlcpy(change_name, speaker_change_name, sizeof(change_name));
+            portEXIT_CRITICAL(&speaker_context_mux);
+            if (has_change && websocket_send_speaker_update(change_name)) {
+                portENTER_CRITICAL(&speaker_context_mux);
+                if (speaker_change_pending && strcmp(speaker_change_name, change_name) == 0) {
+                    speaker_change_pending = false;
+                    strlcpy(speaker_current_name, change_name, sizeof(speaker_current_name));
+                }
+                portEXIT_CRITICAL(&speaker_context_mux);
+            }
         }
         if (alarm_prompt_pending && websocket_is_connected()) {
             if (websocket_send_alarm_prompt(alarm_prompt_info.hour, alarm_prompt_info.minute,
