@@ -105,6 +105,7 @@ const char *speaker_id_status_text(speaker_id_status_t status)
         case SPEAKER_ID_ERR_STORAGE:    return "Gagal menyimpan ke memori.";
         case SPEAKER_ID_ERR_NOMEM:      return "Memori tidak cukup.";
         case SPEAKER_ID_ERR_NO_PROFILE: return "Belum ada profil suara.";
+        case SPEAKER_ID_ERR_FEW:        return "Suara yang terdengar terlalu sedikit. Bicara terus selama rekaman, dekat ke mic robot.";
     }
     return "Error";
 }
@@ -415,481 +416,355 @@ static void load_file(void)
 }
 
 /* ====================================================================
- *  KATA HARIAN: kenali pembicara dari kata yang sering diucapkan
+ *  WARNA SUARA: kenali pembicara dari obrolan bebas (tanpa DTW)
+ *  MFCC frame bersuara -> codebook k-means per orang (VQ).
  * ==================================================================== */
-#define WORD_MAX_FRAMES    100      /* maks 1,0 detik per kata */
-#define WORD_MIN_FRAMES    12       /* min 0,12 detik */
-#define WORD_REF_FLOOR     0.5f
-#define WORD_DEFAULT_TOL   1.5f
-#define WORD_FILE_PATH     "/spiffs/voiceword.bin"
-#define WORD_FILE_TMP      "/spiffs/voiceword.tmp"
-#define WORD_FILE_MAGIC    0x44575053u   /* 'SPWD' */
-#define WORD_FILE_VERSION  1
+#define VP_K                16
+#define VP_MAX_INPUT_SAMPLES 336000          /* 21 detik */
+#define VP_MAX_TOTAL_FRAMES 2100
+#define VP_MAX_FEAT_FRAMES  2100
+#define VP_MIN_ENROLL_FRAMES 800             /* min 8 detik bersuara */
+#define VP_MIN_TEST_FRAMES  40               /* min 0,4 detik bersuara */
+#define VP_REF_FLOOR        0.3f
+#define VP_DEFAULT_TOL      1.3f
+#define VP_FILE_PATH        "/spiffs/voiceprint.bin"
+#define VP_FILE_TMP         "/spiffs/voiceprint.tmp"
+#define VP_FILE_MAGIC       0x50565053u      /* 'SPVP' */
+#define VP_FILE_VERSION     1
 
 typedef struct {
-    uint16_t frames;
-    int16_t  data[WORD_MAX_FRAMES * NUM_CEP];
-} wtemplate_t;
+    char  name[SPEAKER_ID_NAME_MAX + 1];
+    float ref;                               /* jarak rata-rata data uji internal */
+    float cb[VP_K * NUM_CEP];
+} vprofile_t;
 
 typedef struct {
-    char        word[SPEAKER_WORD_NAME_MAX + 1];
-    uint16_t    ref_x100;                          /* jarak acuan antar 2 rekaman x100 */
-    wtemplate_t t[SPEAKER_WORD_SAMPLES];
-} word_t;
+    float energy[VP_MAX_TOTAL_FRAMES];
+    float feat[VP_MAX_FEAT_FRAMES * NUM_CEP];
+} vwork_t;
 
-typedef struct {
-    char    name[SPEAKER_ID_NAME_MAX + 1];
-    uint8_t nwords;
-    word_t  w[SPEAKER_WORD_MAX_PER_PROFILE];
-} wprofile_t;
+static vprofile_t *s_vprofiles = nullptr;
+static int         s_vcount = 0;
+static float       s_vtol = VP_DEFAULT_TOL;
+static vwork_t    *s_vw = nullptr;
+static bool        s_vready = false;
 
-typedef struct {
-    float q[MAX_INPUT_FRAMES * NUM_CEP];   /* fitur ucapan / rekaman */
-    float row_a[MAX_INPUT_FRAMES + 1];
-    float row_b[MAX_INPUT_FRAMES + 1];
-} wwork_t;
-
-static wprofile_t *s_wprofiles = nullptr;
-static int         s_wcount = 0;
-static float       s_wtol = WORD_DEFAULT_TOL;
-static wwork_t    *s_ww = nullptr;
-static wtemplate_t *s_wpend = nullptr;
-static char        s_wpend_name[SPEAKER_ID_NAME_MAX + 1] = {0};
-static char        s_wpend_word[SPEAKER_WORD_NAME_MAX + 1] = {0};
-static int         s_wpend_count = 0;
-static bool        s_wready = false;
-
-static bool sanitize_word(const char *in, char *out)
+static float vdist(const float *a, const float *b)
 {
-    if (!in) return false;
-    while (*in == ' ') ++in;
-    size_t len = strlen(in);
-    while (len > 0 && in[len - 1] == ' ') --len;
-    if (len == 0 || len > SPEAKER_WORD_NAME_MAX) return false;
-    for (size_t i = 0; i < len; ++i) {
-        const char c = in[i];
-        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ' ';
-        if (!ok) return false;
-        out[i] = lower_ascii(c);
+    float d2 = 0.0f;
+    for (int k = 0; k < NUM_CEP; ++k) {
+        const float d = a[k] - b[k];
+        d2 += d * d;
     }
-    out[len] = '\0';
-    return true;
+    return sqrtf(d2);
 }
 
-static int find_wprofile(const char *name)
+static int find_vprofile(const char *name)
 {
-    for (int i = 0; i < s_wcount; ++i)
-        if (names_equal(s_wprofiles[i].name, name)) return i;
+    for (int i = 0; i < s_vcount; ++i)
+        if (names_equal(s_vprofiles[i].name, name)) return i;
     return -1;
 }
 
-static int find_word(const wprofile_t *p, const char *word)
+/* Ambil MFCC hanya dari frame yang bersuara. Hasil di s_vw->feat. Mengembalikan jumlah frame. */
+static int vp_collect(const int16_t *pcm, size_t n, int *count_out)
 {
-    for (int i = 0; i < p->nwords; ++i)
-        if (names_equal(p->w[i].word, word)) return i;
-    return -1;
-}
-
-/* MFCC tanpa CMS (mic dan jalur audio sama saat daftar dan saat ngobrol).
- * Potong diam di awal/akhir, maksimal max_frames frame. Hasil ke out. */
-static speaker_id_status_t word_extract(const int16_t *pcm, size_t n, int max_frames,
-                                        float *out, int *frames_out)
-{
+    *count_out = 0;
     if (!pcm || n < FRAME_LEN) return SPEAKER_ID_ERR_SHORT;
-    if (n > MAX_INPUT_SAMPLES) {
-        pcm += n - MAX_INPUT_SAMPLES;
-        n = MAX_INPUT_SAMPLES;
+    if (n > VP_MAX_INPUT_SAMPLES) {          /* pakai bagian terakhir */
+        pcm += n - VP_MAX_INPUT_SAMPLES;
+        n = VP_MAX_INPUT_SAMPLES;
     }
     int nf = (int)((n - FRAME_LEN) / FRAME_HOP) + 1;
-    if (nf > MAX_INPUT_FRAMES) nf = MAX_INPUT_FRAMES;
+    if (nf > VP_MAX_TOTAL_FRAMES) nf = VP_MAX_TOTAL_FRAMES;
 
-    float max_e = 0.0f;
     for (int t = 0; t < nf; ++t) {
         const int16_t *x = pcm + (size_t)t * FRAME_HOP;
         float sum = 0.0f;
         for (int i = 0; i < FRAME_LEN; ++i) sum += (float)x[i] * (float)x[i];
-        const float e = sum / (float)FRAME_LEN;
-        s_work->energy[t] = e;
-        if (e > max_e) max_e = e;
+        s_vw->energy[t] = sum / (float)FRAME_LEN;
     }
-    if (sqrtf(max_e) < MIN_PEAK_RMS) return SPEAKER_ID_ERR_QUIET;
-
-    float thr = max_e * 0.02f;
-    if (thr < MIN_FRAME_ENERGY) thr = MIN_FRAME_ENERGY;
-    int start = -1, end = -1;
+    float ref_e = 0.0f;                      /* puncak yang dihaluskan 3 frame (abaikan klik) */
     for (int t = 0; t + 2 < nf; ++t) {
-        if (s_work->energy[t] > thr && s_work->energy[t + 1] > thr && s_work->energy[t + 2] > thr) { start = t; break; }
+        float m = s_vw->energy[t];
+        if (s_vw->energy[t + 1] < m) m = s_vw->energy[t + 1];
+        if (s_vw->energy[t + 2] < m) m = s_vw->energy[t + 2];
+        if (m > ref_e) ref_e = m;
     }
-    for (int t = nf - 1; t >= 2; --t) {
-        if (s_work->energy[t] > thr && s_work->energy[t - 1] > thr && s_work->energy[t - 2] > thr) { end = t; break; }
-    }
-    if (start < 0 || end < 0 || end < start) return SPEAKER_ID_ERR_QUIET;
-    start = start >= 5 ? start - 5 : 0;
-    end = (end + 5 < nf) ? end + 5 : nf - 1;
-    int len = end - start + 1;
-    if (len < WORD_MIN_FRAMES) return SPEAKER_ID_ERR_SHORT;
-    if (len > max_frames) {              /* ambil jendela dengan energi terbesar */
-        float sum = 0.0f;
-        for (int i = 0; i < max_frames; ++i) sum += s_work->energy[start + i];
-        float best = sum;
-        int best_start = start;
-        for (int s = start + 1; s + max_frames - 1 <= end; ++s) {
-            sum += s_work->energy[s + max_frames - 1] - s_work->energy[s - 1];
-            if (sum > best) { best = sum; best_start = s; }
-        }
-        start = best_start;
-        len = max_frames;
-    }
-    for (int t = 0; t < len; ++t) {
-        const int16_t *x = pcm + (size_t)(start + t) * FRAME_HOP;
+    if (sqrtf(ref_e) < MIN_PEAK_RMS) return SPEAKER_ID_ERR_QUIET;
+    float thr = ref_e * 0.03f;
+    if (thr < MIN_FRAME_ENERGY) thr = MIN_FRAME_ENERGY;
+
+    int cnt = 0;
+    for (int t = 0; t < nf && cnt < VP_MAX_FEAT_FRAMES; ++t) {
+        if (s_vw->energy[t] <= thr) continue;
+        const int16_t *x = pcm + (size_t)t * FRAME_HOP;
         const int16_t prev = (x > pcm) ? x[-1] : 0;
-        mfcc_frame(x, prev, out + (size_t)t * NUM_CEP);
+        mfcc_frame(x, prev, s_vw->feat + (size_t)cnt * NUM_CEP);
+        ++cnt;
     }
-    *frames_out = len;
+    *count_out = cnt;
     return SPEAKER_ID_OK;
 }
 
-/* Cari template t (nt frame) di dalam ucapan q (nq frame): DTW awal dan akhir bebas.
- * Hasil = biaya terkecil dibagi nt (makin kecil makin mirip). */
-static float spot_distance(const float *q, int nq, const int16_t *t, int nt)
+/* k-means: latih codebook dari frame latih, ukur jarak pada frame uji internal. */
+static bool vp_train(const float *f, int n, float *cb, float *ref_out)
 {
-    const float INF = 1.0e30f;
-    const float inv = 1.0f / FEAT_SCALE;
-    float *prev = s_ww->row_a;
-    float *cur = s_ww->row_b;
-    for (int j = 0; j <= nq; ++j) prev[j] = 0.0f;
-
-    for (int i = 1; i <= nt; ++i) {
-        float tf[NUM_CEP];
-        const int16_t *ti = t + (size_t)(i - 1) * NUM_CEP;
-        for (int k = 0; k < NUM_CEP; ++k) tf[k] = (float)ti[k] * inv;
-        cur[0] = INF;
-        for (int j = 1; j <= nq; ++j) {
-            const float *qj = q + (size_t)(j - 1) * NUM_CEP;
-            float d2 = 0.0f;
-            for (int k = 0; k < NUM_CEP; ++k) {
-                const float d = qj[k] - tf[k];
-                d2 += d * d;
-            }
-            float best = prev[j];
-            if (cur[j - 1] < best) best = cur[j - 1];
-            if (prev[j - 1] < best) best = prev[j - 1];
-            cur[j] = sqrtf(d2) + best;
-        }
-        float *tmp = prev; prev = cur; cur = tmp;
+    static int8_t is_hold[VP_MAX_FEAT_FRAMES];
+    static float  tmp_cb[VP_K * NUM_CEP];
+    static int    cnt[VP_K];
+    int ntrain = 0, nhold = 0;
+    for (int i = 0; i < n; ++i) {            /* blok 1 detik: tiap blok ke-4 jadi data uji */
+        is_hold[i] = ((i / 100) % 4 == 3) ? 1 : 0;
+        if (is_hold[i]) ++nhold; else ++ntrain;
     }
-    float best = 1.0e9f;
-    for (int j = 1; j <= nq; ++j)
-        if (prev[j] < best) best = prev[j];
-    return best / (float)nt;
-}
+    if (ntrain < VP_K * 4 || nhold < 20) return false;
 
-static bool wsave_file(void)
-{
-    FILE *f = fopen(WORD_FILE_TMP, "wb");
-    if (!f) { ESP_LOGE(TAG, "Tidak bisa membuat %s", WORD_FILE_TMP); return false; }
-    file_header_t h = {};
-    h.magic = WORD_FILE_MAGIC;
-    h.version = WORD_FILE_VERSION;
-    h.tol_x100 = (uint16_t)(s_wtol * 100.0f + 0.5f);
-    h.count = (uint32_t)s_wcount;
-    bool ok = fwrite(&h, sizeof(h), 1, f) == 1;
-    for (int p = 0; ok && p < s_wcount; ++p) {
-        const wprofile_t *prof = &s_wprofiles[p];
-        ok = fwrite(prof->name, sizeof(prof->name), 1, f) == 1 &&
-             fwrite(&prof->nwords, sizeof(prof->nwords), 1, f) == 1;
-        for (int w = 0; ok && w < prof->nwords; ++w) {
-            const word_t *wd = &prof->w[w];
-            ok = fwrite(wd->word, sizeof(wd->word), 1, f) == 1 &&
-                 fwrite(&wd->ref_x100, sizeof(wd->ref_x100), 1, f) == 1;
-            for (int k = 0; ok && k < SPEAKER_WORD_SAMPLES; ++k) {
-                ok = fwrite(&wd->t[k].frames, sizeof(uint16_t), 1, f) == 1 &&
-                     fwrite(wd->t[k].data, sizeof(int16_t), (size_t)wd->t[k].frames * NUM_CEP, f) ==
-                         (size_t)wd->t[k].frames * NUM_CEP;
+    /* inisialisasi: frame latih berjarak sama */
+    int picked = 0;
+    const int stride = ntrain / VP_K;
+    int seen = 0;
+    for (int i = 0; i < n && picked < VP_K; ++i) {
+        if (is_hold[i]) continue;
+        if (seen % stride == 0) {
+            memcpy(cb + (size_t)picked * NUM_CEP, f + (size_t)i * NUM_CEP, sizeof(float) * NUM_CEP);
+            ++picked;
+        }
+        ++seen;
+    }
+    if (picked < VP_K) return false;
+
+    for (int iter = 0; iter < 14; ++iter) {
+        memset(tmp_cb, 0, sizeof(tmp_cb));
+        memset(cnt, 0, sizeof(cnt));
+        float far_d = -1.0f;
+        int far_i = 0;
+        for (int i = 0; i < n; ++i) {
+            if (is_hold[i]) continue;
+            const float *x = f + (size_t)i * NUM_CEP;
+            int bk = 0;
+            float bd = 1.0e30f;
+            for (int k = 0; k < VP_K; ++k) {
+                const float d = vdist(x, cb + (size_t)k * NUM_CEP);
+                if (d < bd) { bd = d; bk = k; }
+            }
+            if (bd > far_d) { far_d = bd; far_i = i; }
+            ++cnt[bk];
+            for (int j = 0; j < NUM_CEP; ++j) tmp_cb[(size_t)bk * NUM_CEP + j] += x[j];
+        }
+        for (int k = 0; k < VP_K; ++k) {
+            if (cnt[k] > 0) {
+                for (int j = 0; j < NUM_CEP; ++j) cb[(size_t)k * NUM_CEP + j] = tmp_cb[(size_t)k * NUM_CEP + j] / (float)cnt[k];
+            } else {                          /* klaster kosong: pindah ke frame terjauh */
+                memcpy(cb + (size_t)k * NUM_CEP, f + (size_t)far_i * NUM_CEP, sizeof(float) * NUM_CEP);
             }
         }
     }
-    if (fflush(f) != 0) ok = false;
-    if (fclose(f) != 0) ok = false;
-    if (!ok) { remove(WORD_FILE_TMP); ESP_LOGE(TAG, "Tulis file kata gagal"); return false; }
-    remove(WORD_FILE_PATH);
-    if (rename(WORD_FILE_TMP, WORD_FILE_PATH) != 0) { ESP_LOGE(TAG, "Rename file kata gagal"); return false; }
+    float sum = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        if (!is_hold[i]) continue;
+        const float *x = f + (size_t)i * NUM_CEP;
+        float bd = 1.0e30f;
+        for (int k = 0; k < VP_K; ++k) {
+            const float d = vdist(x, cb + (size_t)k * NUM_CEP);
+            if (d < bd) bd = d;
+        }
+        sum += bd;
+    }
+    *ref_out = sum / (float)nhold;
     return true;
 }
 
-static void wload_file(void)
+static bool vsave_file(void)
 {
-    s_wcount = 0;
-    FILE *f = fopen(WORD_FILE_PATH, "rb");
-    if (!f) { ESP_LOGI(TAG, "Belum ada file kata harian"); return; }
+    FILE *f = fopen(VP_FILE_TMP, "wb");
+    if (!f) { ESP_LOGE(TAG, "Tidak bisa membuat %s", VP_FILE_TMP); return false; }
     file_header_t h = {};
-    if (fread(&h, sizeof(h), 1, f) != 1 || h.magic != WORD_FILE_MAGIC || h.version != WORD_FILE_VERSION ||
+    h.magic = VP_FILE_MAGIC;
+    h.version = VP_FILE_VERSION;
+    h.tol_x100 = (uint16_t)(s_vtol * 100.0f + 0.5f);
+    h.count = (uint32_t)s_vcount;
+    bool ok = fwrite(&h, sizeof(h), 1, f) == 1;
+    for (int i = 0; ok && i < s_vcount; ++i)
+        ok = fwrite(&s_vprofiles[i], sizeof(vprofile_t), 1, f) == 1;
+    if (fflush(f) != 0) ok = false;
+    if (fclose(f) != 0) ok = false;
+    if (!ok) { remove(VP_FILE_TMP); ESP_LOGE(TAG, "Tulis file warna suara gagal"); return false; }
+    remove(VP_FILE_PATH);
+    if (rename(VP_FILE_TMP, VP_FILE_PATH) != 0) { ESP_LOGE(TAG, "Rename file warna suara gagal"); return false; }
+    return true;
+}
+
+static void vload_file(void)
+{
+    s_vcount = 0;
+    FILE *f = fopen(VP_FILE_PATH, "rb");
+    if (!f) { ESP_LOGI(TAG, "Belum ada file warna suara"); return; }
+    file_header_t h = {};
+    if (fread(&h, sizeof(h), 1, f) != 1 || h.magic != VP_FILE_MAGIC || h.version != VP_FILE_VERSION ||
         h.count > SPEAKER_ID_MAX_PROFILES) {
         fclose(f);
-        ESP_LOGW(TAG, "File kata harian tidak valid; diabaikan");
+        ESP_LOGW(TAG, "File warna suara tidak valid; diabaikan");
         return;
     }
     const float tol = (float)h.tol_x100 / 100.0f;
-    if (tol >= 1.0f && tol <= 3.0f) s_wtol = tol;
-    bool ok = true;
+    if (tol >= 1.0f && tol <= 3.0f) s_vtol = tol;
     int loaded = 0;
-    for (uint32_t p = 0; ok && p < h.count; ++p) {
-        wprofile_t *prof = &s_wprofiles[loaded];
-        memset(prof, 0, sizeof(*prof));
-        ok = fread(prof->name, sizeof(prof->name), 1, f) == 1 &&
-             fread(&prof->nwords, sizeof(prof->nwords), 1, f) == 1 &&
-             prof->nwords > 0 && prof->nwords <= SPEAKER_WORD_MAX_PER_PROFILE;
-        prof->name[SPEAKER_ID_NAME_MAX] = '\0';
-        for (int w = 0; ok && w < prof->nwords; ++w) {
-            word_t *wd = &prof->w[w];
-            ok = fread(wd->word, sizeof(wd->word), 1, f) == 1 &&
-                 fread(&wd->ref_x100, sizeof(wd->ref_x100), 1, f) == 1;
-            wd->word[SPEAKER_WORD_NAME_MAX] = '\0';
-            for (int k = 0; ok && k < SPEAKER_WORD_SAMPLES; ++k) {
-                ok = fread(&wd->t[k].frames, sizeof(uint16_t), 1, f) == 1 &&
-                     wd->t[k].frames >= WORD_MIN_FRAMES && wd->t[k].frames <= WORD_MAX_FRAMES &&
-                     fread(wd->t[k].data, sizeof(int16_t), (size_t)wd->t[k].frames * NUM_CEP, f) ==
-                         (size_t)wd->t[k].frames * NUM_CEP;
-            }
-        }
-        if (ok) ++loaded;
+    for (uint32_t i = 0; i < h.count; ++i) {
+        vprofile_t *p = &s_vprofiles[loaded];
+        if (fread(p, sizeof(vprofile_t), 1, f) != 1) { loaded = 0; break; }
+        p->name[SPEAKER_ID_NAME_MAX] = '\0';
+        if (!(p->ref > 0.0f && p->ref < 1000.0f)) { loaded = 0; break; }
+        ++loaded;
     }
     fclose(f);
-    if (!ok) { loaded = 0; ESP_LOGW(TAG, "Isi file kata harian rusak; semua kata diabaikan"); }
-    s_wcount = loaded;
+    s_vcount = loaded;
+    if (loaded == 0 && h.count > 0) ESP_LOGW(TAG, "Isi file warna suara rusak; semua diabaikan");
 }
 
-static void word_init(void)
+static void vp_init(void)
 {
     const uint32_t caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    s_wprofiles = (wprofile_t *)heap_caps_calloc(SPEAKER_ID_MAX_PROFILES, sizeof(wprofile_t), caps);
-    s_wpend = (wtemplate_t *)heap_caps_calloc(SPEAKER_WORD_SAMPLES, sizeof(wtemplate_t), caps);
-    s_ww = (wwork_t *)heap_caps_calloc(1, sizeof(wwork_t), caps);
-    if (!s_wprofiles || !s_wpend || !s_ww) {
-        ESP_LOGE(TAG, "Alokasi PSRAM kata harian gagal (%u byte); fitur kata harian mati",
-                 (unsigned)(SPEAKER_ID_MAX_PROFILES * sizeof(wprofile_t)));
-        heap_caps_free(s_wprofiles); s_wprofiles = nullptr;
-        heap_caps_free(s_wpend);     s_wpend = nullptr;
-        heap_caps_free(s_ww);        s_ww = nullptr;
+    s_vprofiles = (vprofile_t *)heap_caps_calloc(SPEAKER_ID_MAX_PROFILES, sizeof(vprofile_t), caps);
+    s_vw = (vwork_t *)heap_caps_calloc(1, sizeof(vwork_t), caps);
+    if (!s_vprofiles || !s_vw) {
+        ESP_LOGE(TAG, "Alokasi PSRAM warna suara gagal; fitur warna suara mati");
+        heap_caps_free(s_vprofiles); s_vprofiles = nullptr;
+        heap_caps_free(s_vw);        s_vw = nullptr;
         return;
     }
-    wload_file();
-    s_wready = true;
-    ESP_LOGI(TAG, "Kata harian siap: profil=%d toleransi=%.2f", s_wcount, (double)s_wtol);
+    vload_file();
+    s_vready = true;
+    ESP_LOGI(TAG, "Warna suara siap: profil=%d toleransi=%.2f", s_vcount, (double)s_vtol);
 }
 
-bool speaker_id_has_words(void) { return s_ready && s_wready && s_wcount > 0; }
-int  speaker_id_word_profile_count(void) { return (s_ready && s_wready) ? s_wcount : 0; }
-float speaker_id_word_get_tolerance(void) { return s_wtol; }
+bool speaker_vp_has_profiles(void) { return s_ready && s_vready && s_vcount > 0; }
+int  speaker_vp_profile_count(void) { return (s_ready && s_vready) ? s_vcount : 0; }
+float speaker_vp_get_tolerance(void) { return s_vtol; }
 
-bool speaker_id_word_set_tolerance(float tolerance)
+bool speaker_vp_set_tolerance(float tolerance)
 {
-    if (!s_ready || !s_wready || tolerance < 1.0f || tolerance > 3.0f) return false;
+    if (!s_ready || !s_vready || tolerance < 1.0f || tolerance > 3.0f) return false;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    s_wtol = tolerance;
-    const bool ok = wsave_file();
+    s_vtol = tolerance;
+    const bool ok = vsave_file();
     xSemaphoreGive(s_mutex);
     return ok;
 }
 
-bool speaker_id_word_get_profile(int index, char *name, size_t name_size, int *word_count)
+bool speaker_vp_get_profile(int index, char *name, size_t name_size)
 {
-    if (!s_ready || !s_wready || index < 0 || index >= s_wcount) return false;
+    if (!s_ready || !s_vready || index < 0 || index >= s_vcount) return false;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    if (name && name_size) strlcpy(name, s_wprofiles[index].name, name_size);
-    if (word_count) *word_count = s_wprofiles[index].nwords;
+    if (name && name_size) strlcpy(name, s_vprofiles[index].name, name_size);
     xSemaphoreGive(s_mutex);
     return true;
 }
 
-bool speaker_id_word_get_word(int pidx, int widx, char *word, size_t word_size)
-{
-    if (!s_ready || !s_wready || pidx < 0 || pidx >= s_wcount) return false;
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    bool ok = widx >= 0 && widx < s_wprofiles[pidx].nwords;
-    if (ok && word && word_size) strlcpy(word, s_wprofiles[pidx].w[widx].word, word_size);
-    xSemaphoreGive(s_mutex);
-    return ok;
-}
-
-speaker_id_status_t speaker_id_word_identify(const int16_t *pcm, size_t samples,
-                                             speaker_word_result_t *out)
+speaker_id_status_t speaker_vp_identify(const int16_t *pcm, size_t samples, speaker_vp_result_t *out)
 {
     if (out) memset(out, 0, sizeof(*out));
-    if (!s_ready || !s_wready) return SPEAKER_ID_ERR_NOT_READY;
-    if (s_wcount == 0) return SPEAKER_ID_ERR_NO_PROFILE;
+    if (!s_ready || !s_vready) return SPEAKER_ID_ERR_NOT_READY;
+    if (s_vcount == 0) return SPEAKER_ID_ERR_NO_PROFILE;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     const int64_t t0 = esp_timer_get_time();
-    int nq = 0;
-    speaker_id_status_t st = word_extract(pcm, samples, MAX_INPUT_FRAMES, s_ww->q, &nq);
-    if (st != SPEAKER_ID_OK) {
-        xSemaphoreGive(s_mutex);
-        return st;
-    }
+    int n = 0;
+    speaker_id_status_t st = (speaker_id_status_t)vp_collect(pcm, samples, &n);
+    if (st != SPEAKER_ID_OK) { xSemaphoreGive(s_mutex); return st; }
+    if (n < VP_MIN_TEST_FRAMES) { xSemaphoreGive(s_mutex); return SPEAKER_ID_ERR_FEW; }
 
     int best = -1;
     float best_ratio = 1.0e9f, second_ratio = 1.0e9f;
-    char best_word[SPEAKER_WORD_NAME_MAX + 1] = {0};
-    for (int p = 0; p < s_wcount; ++p) {
-        const wprofile_t *prof = &s_wprofiles[p];
-        float p_best = 1.0e9f;
-        int p_word = 0;
-        for (int w = 0; w < prof->nwords; ++w) {
-            const word_t *wd = &prof->w[w];
-            float sum = 0.0f;
-            for (int k = 0; k < SPEAKER_WORD_SAMPLES; ++k)
-                sum += spot_distance(s_ww->q, nq, wd->t[k].data, wd->t[k].frames);
-            float ref = (float)wd->ref_x100 / 100.0f;
-            if (ref < WORD_REF_FLOOR) ref = WORD_REF_FLOOR;
-            const float ratio = (sum / (float)SPEAKER_WORD_SAMPLES) / ref;
-            if (ratio < p_best) { p_best = ratio; p_word = w; }
+    for (int p = 0; p < s_vcount; ++p) {
+        const vprofile_t *prof = &s_vprofiles[p];
+        float sum = 0.0f;
+        for (int i = 0; i < n; ++i) {
+            const float *x = s_vw->feat + (size_t)i * NUM_CEP;
+            float bd = 1.0e30f;
+            for (int k = 0; k < VP_K; ++k) {
+                const float d = vdist(x, prof->cb + (size_t)k * NUM_CEP);
+                if (d < bd) bd = d;
+            }
+            sum += bd;
         }
+        float ref = prof->ref;
+        if (ref < VP_REF_FLOOR) ref = VP_REF_FLOOR;
+        const float ratio = (sum / (float)n) / ref;
         if (out && p < SPEAKER_ID_MAX_PROFILES) {
             strlcpy(out->scores[p].name, prof->name, sizeof(out->scores[p].name));
-            strlcpy(out->scores[p].word, prof->w[p_word].word, sizeof(out->scores[p].word));
-            out->scores[p].ratio = p_best;
+            out->scores[p].ratio = ratio;
             out->score_count = p + 1;
         }
-        if (p_best < best_ratio) {
-            second_ratio = best_ratio;
-            best_ratio = p_best;
-            best = p;
-            strlcpy(best_word, prof->w[p_word].word, sizeof(best_word));
-        } else if (p_best < second_ratio) {
-            second_ratio = p_best;
-        }
+        if (ratio < best_ratio) { second_ratio = best_ratio; best_ratio = ratio; best = p; }
+        else if (ratio < second_ratio) second_ratio = ratio;
     }
-    const bool ambiguous = s_wcount >= 2 && second_ratio < best_ratio * AMBIGUOUS_MARGIN;
-    const bool known = best >= 0 && best_ratio <= s_wtol && !ambiguous;
+    const bool ambiguous = s_vcount >= 2 && second_ratio < best_ratio * AMBIGUOUS_MARGIN;
+    const bool known = best >= 0 && best_ratio <= s_vtol && !ambiguous;
     if (out) {
         out->known = known;
-        out->ambiguous = ambiguous && best_ratio <= s_wtol;
+        out->ambiguous = ambiguous && best_ratio <= s_vtol;
         out->ratio = best_ratio;
-        if (best >= 0) strlcpy(out->word, best_word, sizeof(out->word));
-        if (known) strlcpy(out->name, s_wprofiles[best].name, sizeof(out->name));
+        out->frames = n;
+        if (known) strlcpy(out->name, s_vprofiles[best].name, sizeof(out->name));
     }
-    ESP_LOGI(TAG, "Kata harian: frame=%d terbaik=%s kata='%s' rasio=%.2f kedua=%.2f toleransi=%.2f -> %s%s (%lld ms)",
-             nq, best >= 0 ? s_wprofiles[best].name : "-", best_word, (double)best_ratio,
-             s_wcount >= 2 ? (double)second_ratio : 0.0, (double)s_wtol,
+    ESP_LOGI(TAG, "Warna suara: frame=%d terbaik=%s rasio=%.2f kedua=%.2f toleransi=%.2f -> %s%s (%lld ms)",
+             n, best >= 0 ? s_vprofiles[best].name : "-", (double)best_ratio,
+             s_vcount >= 2 ? (double)second_ratio : 0.0, (double)s_vtol,
              known ? "DIKENAL" : "TIDAK DIKENAL",
-             (ambiguous && best_ratio <= s_wtol) ? " (ragu: dua profil mirip)" : "",
+             (ambiguous && best_ratio <= s_vtol) ? " (ragu: dua profil mirip)" : "",
              (long long)((esp_timer_get_time() - t0) / 1000));
     xSemaphoreGive(s_mutex);
     return SPEAKER_ID_OK;
 }
 
-speaker_id_status_t speaker_id_word_enroll(const char *name, const char *word, int step,
-                                           const int16_t *pcm, size_t samples,
-                                           int *count_out, bool *done_out)
+speaker_id_status_t speaker_vp_enroll(const char *name, const int16_t *pcm, size_t samples, int *frames_out)
 {
-    if (count_out) *count_out = 0;
-    if (done_out) *done_out = false;
-    if (!s_ready || !s_wready) return SPEAKER_ID_ERR_NOT_READY;
-
-    char cname[SPEAKER_ID_NAME_MAX + 1];
-    char cword[SPEAKER_WORD_NAME_MAX + 1];
-    if (!sanitize_name(name, cname) || !sanitize_word(word, cword)) return SPEAKER_ID_ERR_NAME;
+    if (frames_out) *frames_out = 0;
+    if (!s_ready || !s_vready) return SPEAKER_ID_ERR_NOT_READY;
+    char clean[SPEAKER_ID_NAME_MAX + 1];
+    if (!sanitize_name(name, clean)) return SPEAKER_ID_ERR_NAME;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+    int idx = find_vprofile(clean);
+    if (idx < 0 && s_vcount >= SPEAKER_ID_MAX_PROFILES) { xSemaphoreGive(s_mutex); return SPEAKER_ID_ERR_FULL; }
 
-    if (step == 1) {
-        const int pi = find_wprofile(cname);
-        if (pi < 0 && s_wcount >= SPEAKER_ID_MAX_PROFILES) { xSemaphoreGive(s_mutex); return SPEAKER_ID_ERR_FULL; }
-        if (pi >= 0 && find_word(&s_wprofiles[pi], cword) < 0 &&
-            s_wprofiles[pi].nwords >= SPEAKER_WORD_MAX_PER_PROFILE) {
-            xSemaphoreGive(s_mutex);
-            return SPEAKER_ID_ERR_FULL;
-        }
-        strlcpy(s_wpend_name, cname, sizeof(s_wpend_name));
-        strlcpy(s_wpend_word, cword, sizeof(s_wpend_word));
-        s_wpend_count = 0;
-    } else if (!names_equal(s_wpend_name, cname) || !names_equal(s_wpend_word, cword) ||
-               step != s_wpend_count + 1) {
-        xSemaphoreGive(s_mutex);
-        return SPEAKER_ID_ERR_STEP;
-    }
-
-    int frames = 0;
-    speaker_id_status_t st = word_extract(pcm, samples, WORD_MAX_FRAMES, s_ww->q, &frames);
+    int n = 0;
+    speaker_id_status_t st = (speaker_id_status_t)vp_collect(pcm, samples, &n);
     if (st != SPEAKER_ID_OK) { xSemaphoreGive(s_mutex); return st; }
+    if (frames_out) *frames_out = n;
+    if (n < VP_MIN_ENROLL_FRAMES) { xSemaphoreGive(s_mutex); return SPEAKER_ID_ERR_FEW; }
 
-    wtemplate_t *slot = &s_wpend[s_wpend_count];
-    slot->frames = (uint16_t)frames;
-    for (int i = 0; i < frames * NUM_CEP; ++i) slot->data[i] = quantize(s_ww->q[i]);
-    ++s_wpend_count;
-    if (count_out) *count_out = s_wpend_count;
-    if (s_wpend_count < SPEAKER_WORD_SAMPLES) { xSemaphoreGive(s_mutex); return SPEAKER_ID_OK; }
-
-    /* Jarak acuan: rekaman 1 dicari di rekaman 2 dan sebaliknya. */
+    vprofile_t np;
+    memset(&np, 0, sizeof(np));
+    strlcpy(np.name, clean, sizeof(np.name));
     float ref = 0.0f;
-    for (int a = 0; a < SPEAKER_WORD_SAMPLES; ++a) {
-        const int b = (a + 1) % SPEAKER_WORD_SAMPLES;
-        for (int i = 0; i < s_wpend[b].frames * NUM_CEP; ++i)
-            s_ww->q[i] = (float)s_wpend[b].data[i] / FEAT_SCALE;
-        ref += spot_distance(s_ww->q, s_wpend[b].frames, s_wpend[a].data, s_wpend[a].frames);
-    }
-    ref /= (float)SPEAKER_WORD_SAMPLES;
+    if (!vp_train(s_vw->feat, n, np.cb, &ref)) { xSemaphoreGive(s_mutex); return SPEAKER_ID_ERR_FEW; }
+    np.ref = ref;
 
-    int pi = find_wprofile(cname);
-    const bool new_profile = pi < 0;
-    if (new_profile) {
-        pi = s_wcount;
-        memset(&s_wprofiles[pi], 0, sizeof(wprofile_t));
-        strlcpy(s_wprofiles[pi].name, cname, sizeof(s_wprofiles[pi].name));
-        ++s_wcount;
+    const bool is_new = idx < 0;
+    if (is_new) idx = s_vcount++;
+    vprofile_t old = s_vprofiles[idx];
+    s_vprofiles[idx] = np;
+    const bool saved = vsave_file();
+    if (!saved) {
+        if (is_new) --s_vcount; else s_vprofiles[idx] = old;
     }
-    wprofile_t *prof = &s_wprofiles[pi];
-    int wi = find_word(prof, cword);
-    const bool new_word = wi < 0;
-    if (new_word) wi = prof->nwords++;
-    word_t *wd = &prof->w[wi];
-    memset(wd, 0, sizeof(*wd));
-    strlcpy(wd->word, cword, sizeof(wd->word));
-    float ref_x100 = ref * 100.0f;
-    if (ref_x100 > 65000.0f) ref_x100 = 65000.0f;
-    wd->ref_x100 = (uint16_t)ref_x100;
-    memcpy(wd->t, s_wpend, sizeof(wd->t));
-
-    const bool saved = wsave_file();
-    if (!saved) {                         /* batalkan perubahan di memori */
-        if (new_word) --prof->nwords;
-        if (new_profile) --s_wcount;
-    }
-    s_wpend_name[0] = '\0';
-    s_wpend_word[0] = '\0';
-    s_wpend_count = 0;
-    if (done_out) *done_out = saved;
-    ESP_LOGI(TAG, "Kata '%s' milik '%s' %s: acuan=%.2f", cword, cname, saved ? "tersimpan" : "GAGAL disimpan", (double)ref);
+    ESP_LOGI(TAG, "Warna suara '%s' %s: frame=%d acuan=%.2f", clean, saved ? "tersimpan" : "GAGAL disimpan", n, (double)ref);
     xSemaphoreGive(s_mutex);
     return saved ? SPEAKER_ID_OK : SPEAKER_ID_ERR_STORAGE;
 }
 
-bool speaker_id_word_delete(const char *name, const char *word)
+bool speaker_vp_delete(const char *name)
 {
-    if (!s_ready || !s_wready || !name) return false;
+    if (!s_ready || !s_vready || !name) return false;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     bool ok = false;
-    const int pi = find_wprofile(name);
-    if (pi >= 0) {
-        wprofile_t *prof = &s_wprofiles[pi];
-        bool remove_profile = (word == nullptr || word[0] == '\0');
-        if (!remove_profile) {
-            const int wi = find_word(prof, word);
-            if (wi >= 0) {
-                for (int i = wi; i + 1 < prof->nwords; ++i) memcpy(&prof->w[i], &prof->w[i + 1], sizeof(word_t));
-                --prof->nwords;
-                ok = true;
-                if (prof->nwords == 0) remove_profile = true;
-            }
-        } else {
-            ok = true;
-        }
-        if (remove_profile) {
-            for (int i = pi; i + 1 < s_wcount; ++i) memcpy(&s_wprofiles[i], &s_wprofiles[i + 1], sizeof(wprofile_t));
-            --s_wcount;
-        }
-        if (ok) ok = wsave_file();
+    const int idx = find_vprofile(name);
+    if (idx >= 0) {
+        for (int i = idx; i + 1 < s_vcount; ++i) memcpy(&s_vprofiles[i], &s_vprofiles[i + 1], sizeof(vprofile_t));
+        --s_vcount;
+        ok = vsave_file();
     }
     xSemaphoreGive(s_mutex);
     return ok;
@@ -961,8 +836,8 @@ bool speaker_id_init(void)
     if (!s_mutex) return false;
     init_tables();
     load_file();
-    s_ready = true;                  /* word_init memakai s_ready/s_mutex */
-    word_init();
+    s_ready = true;                  /* vp_init memakai s_ready/s_mutex */
+    vp_init();
     ESP_LOGI(TAG, "Pengenal suara siap: profil=%d toleransi=%.2f", s_count, (double)s_tol);
     return true;
 }
