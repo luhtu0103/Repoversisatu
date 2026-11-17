@@ -50,24 +50,21 @@ static const char *VOICE_HTML = R"rawliteral(
 </div>
 <h3>Profil tersimpan</h3>
 <div id="ls" class="box">...</div>
-<h3>Kata harian (dikenali saat ngobrol)</h3>
+<h3>Warna suara (dikenali saat ngobrol)</h3>
 <div class="box">
-  <small>Ucapkan tiap kata 2 kali ke <b>mic robot</b>. Robot lalu mengenalimu saat kamu memakai kata itu di tengah obrolan.</small>
-  <input id="wn" maxlength="24" placeholder="Nama (sama seperti di atas)">
-  <input id="ww" maxlength="15" placeholder="Kata (mis. nyalakan)">
-  <div id="chips"></div>
-  <button id="wbt" onclick="wrec()">Rekam kata 1/2</button>
-  <button id="wall" onclick="wauto()">Daftar semua kata saran (otomatis)</button>
-  <button id="wstop" onclick="wstopNow()" style="background:#6b7280;display:none">Berhenti</button>
-  <div id="wmsg"></div>
+  <small>Bicara bebas <b>20 detik</b> ke <b>mic robot</b>, jarak 20-30 cm, suasana tenang. Bicara terus tanpa berhenti lama.
+  Contoh: ceritakan harimu, atau baca: "Selamat pagi, hari ini aku mau menyalakan lampu kamar, lalu menanyakan jam berapa sekarang dan cuaca di luar."</small>
+  <input id="vn" maxlength="24" placeholder="Nama (sama seperti di atas)">
+  <button id="vbt" onclick="vrec()">Rekam warna suara (20 detik)</button>
+  <div id="vmsg"></div>
 </div>
-<div id="wls" class="box">...</div>
+<div id="vls" class="box">...</div>
 <div class="box">
-  <button onclick="wtst()">Tes kata (ucapkan satu kalimat)</button>
-  <div id="wtr"></div>
-  <small>Batas rasio kata (1.0 - 3.0). Naikkan jika sering tidak dikenali, turunkan jika orang lain ikut dikenali.</small>
-  <input id="wtol" type="number" min="1" max="3" step="0.1" value="1.5">
-  <button onclick="wsetTol()">Simpan batas kata</button>
+  <button onclick="vtst()">Tes warna suara (bicara 4 detik)</button>
+  <div id="vtr"></div>
+  <small>Batas rasio (1.0 - 3.0). Naikkan jika suaramu sering tidak dikenali, turunkan jika orang lain ikut dikenali.</small>
+  <input id="vtol" type="number" min="1" max="3" step="0.1" value="1.3">
+  <button onclick="vsetTol()">Simpan batas warna suara</button>
 </div>
 <h3>Tes suara</h3>
 <div class="box">
@@ -138,109 +135,56 @@ async function setTol() {
 }
 load();
 
-var WORDS = ['nyalakan','matikan','siapa','baca','tolong','oke','kamu','jam berapa','tanggal berapa','saya','coba','lampu','buka','tutup','putar','terima kasih'];
-var wdata = {}; var wstop = false; var wbusy = false;
-function wstopNow() { wstop = true; $('wmsg').textContent = 'Berhenti setelah rekaman ini...'; }
-async function wload() {
+var vbusy = false;
+async function vload() {
   try {
-    var r = await fetch('/voice/wlist'); var d = await r.json();
-    $('wtol').value = d.tol; wdata = {};
-    var ls = $('wls'); ls.textContent = '';
-    if (!d.profiles.length) ls.textContent = 'Belum ada kata harian.';
-    d.profiles.forEach(function (p) {
-      wdata[p.name.toLowerCase()] = p.words;
-      var row = document.createElement('div'); row.className = 'row'; row.style.display = 'block';
-      var t = document.createElement('div'); t.textContent = p.name + ' (' + p.words.length + ' kata)';
-      row.appendChild(t);
-      p.words.forEach(function (w) {
-        var c = document.createElement('span'); c.className = 'chip on'; c.textContent = w;
-        var x = document.createElement('small'); x.textContent = 'x';
-        x.onclick = async function () {
-          if (!confirm('Hapus kata ' + w + ' milik ' + p.name + '?')) return;
-          await post('/voice/wdel?name=' + encodeURIComponent(p.name) + '&word=' + encodeURIComponent(w)); wload();
-        };
-        c.appendChild(x); row.appendChild(c);
-      });
-      var b = document.createElement('button'); b.className = 'del'; b.style.marginTop = '6px'; b.textContent = 'Hapus semua kata ' + p.name;
+    var r = await fetch('/voice/vlist'); var d = await r.json();
+    $('vtol').value = d.tol;
+    var ls = $('vls'); ls.textContent = '';
+    if (!d.profiles.length) { ls.textContent = 'Belum ada warna suara.'; return; }
+    d.profiles.forEach(function (name) {
+      var row = document.createElement('div'); row.className = 'row';
+      var t = document.createElement('span'); t.textContent = name;
+      var b = document.createElement('button'); b.className = 'del'; b.textContent = 'Hapus';
       b.onclick = async function () {
-        if (!confirm('Hapus semua kata ' + p.name + '?')) return;
-        await post('/voice/wdel?name=' + encodeURIComponent(p.name)); wload();
+        if (!confirm('Hapus warna suara ' + name + '?')) return;
+        await post('/voice/vdel?name=' + encodeURIComponent(name)); vload();
       };
-      row.appendChild(b); ls.appendChild(row);
+      row.appendChild(t); row.appendChild(b); ls.appendChild(row);
     });
-    wchips();
-  } catch (e) { $('wls').textContent = 'Gagal membaca daftar kata.'; }
+  } catch (e) { $('vls').textContent = 'Gagal membaca daftar.'; }
 }
-function wchips() {
-  var box = $('chips'); box.textContent = '';
-  var have = wdata[$('wn').value.trim().toLowerCase()] || [];
-  WORDS.forEach(function (w) {
-    var c = document.createElement('span'); c.className = 'chip' + (have.indexOf(w) >= 0 ? ' on' : ''); c.textContent = w;
-    c.onclick = function () { $('ww').value = w; };
-    box.appendChild(c);
-  });
-}
-async function wcount(word) {
-  var el = $('wmsg');
+async function vrec() {
+  var name = $('vn').value.trim();
+  if (!name) { $('vmsg').textContent = 'Isi nama dulu.'; return; }
+  if (vbusy) return; vbusy = true; $('vbt').disabled = true;
+  var el = $('vmsg');
   for (var i = 3; i > 0; i--) { el.textContent = 'Siap... ' + i; await sleep(900); }
-  el.textContent = 'Ucapkan "' + word + '" SEKARANG!';
+  el.textContent = 'BICARA SEKARANG selama 20 detik...';
+  var tick = 20;
+  var timer = setInterval(function () { tick--; if (tick > 0) el.textContent = 'Bicara terus... sisa ' + tick + ' detik'; }, 1000);
+  var d = await post('/voice/vrec?name=' + encodeURIComponent(name));
+  clearInterval(timer);
+  el.textContent = d.msg;
+  if (d.ok) vload();
+  $('vbt').disabled = false; vbusy = false;
 }
-async function wrecStep(name, word, step) {
-  await wcount(word);
-  var d = await post('/voice/wrec?name=' + encodeURIComponent(name) + '&word=' + encodeURIComponent(word) + '&step=' + step);
-  $('wmsg').textContent = word + ': ' + d.msg;
-  return d;
-}
-var wst = 1;
-async function wrec() {
-  var name = $('wn').value.trim(), word = $('ww').value.trim();
-  if (!name || !word) { $('wmsg').textContent = 'Isi nama dan kata dulu.'; return; }
-  if (wbusy) return; wbusy = true; $('wbt').disabled = true;
-  var d = await wrecStep(name, word, wst);
-  if (d.ok) {
-    if (d.done) { wst = 1; $('wbt').textContent = 'Rekam kata 1/2'; wload(); }
-    else { wst = d.count + 1; $('wbt').textContent = 'Rekam kata ' + wst + '/2'; }
-  } else if (wst > 1 && /Urutan/.test(d.msg)) { wst = 1; $('wbt').textContent = 'Rekam kata 1/2'; }
-  $('wbt').disabled = false; wbusy = false;
-}
-async function wauto() {
-  var name = $('wn').value.trim();
-  if (!name) { $('wmsg').textContent = 'Isi nama dulu.'; return; }
-  if (wbusy) return; wbusy = true; wstop = false;
-  $('wall').disabled = true; $('wbt').disabled = true; $('wstop').style.display = 'block';
-  var have = (wdata[name.toLowerCase()] || []).slice();
-  for (var i = 0; i < WORDS.length && !wstop; i++) {
-    var w = WORDS[i]; if (have.indexOf(w) >= 0) continue;
-    var s = 1, fails = 0;
-    while (s <= 2 && !wstop) {
-      var d = await wrecStep(name, w, s);
-      if (d.ok) { s = d.done ? 3 : s + 1; fails = 0; }
-      else if (/penuh/.test(d.msg)) { wstop = true; }
-      else if (/Urutan/.test(d.msg)) { s = 1; }
-      else { fails++; if (fails >= 4) { wstop = true; } await sleep(1200); }
-    }
-    if (s > 2) { have.push(w); await wload(); }
-  }
-  $('wmsg').textContent = wstop ? 'Berhenti. Kata yang sudah selesai tetap tersimpan.' : 'Semua kata saran selesai.';
-  $('wall').disabled = false; $('wbt').disabled = false; $('wstop').style.display = 'none'; wbusy = false;
-  wload();
-}
-async function wtst() {
-  await wcount('kalimat apa saja');
-  var d = await post('/voice/wtest');
-  var el = $('wtr');
+async function vtst() {
+  var el = $('vtr');
+  for (var i = 3; i > 0; i--) { el.textContent = 'Siap... ' + i; await sleep(900); }
+  el.textContent = 'Bicara sekarang (kalimat apa saja)...';
+  var d = await post('/voice/vtest');
   if (!d.ok) { el.textContent = d.msg; return; }
-  var s = (d.known ? 'DIKENAL: ' + d.name + ' (kata "' + d.word + '")' : (d.ambiguous ? 'RAGU (mirip lebih dari satu profil) = tidak dikenali' : 'TIDAK DIKENAL')) + ' (batas rasio ' + d.tol + ')';
-  d.scores.forEach(function (x) { s += '\n' + x.name + ': kata "' + x.word + '" rasio ' + x.ratio.toFixed(2); });
+  var s = (d.known ? 'DIKENAL: ' + d.name : (d.ambiguous ? 'RAGU (mirip lebih dari satu orang) = tidak dikenali' : 'TIDAK DIKENAL')) + ' (batas rasio ' + d.tol + ', ' + d.frames + ' frame suara)';
+  d.scores.forEach(function (x) { s += '\n' + x.name + ': rasio ' + x.ratio.toFixed(2); });
   el.style.whiteSpace = 'pre-line'; el.textContent = s;
 }
-async function wsetTol() {
-  var d = await post('/voice/wtol?v=' + encodeURIComponent($('wtol').value));
+async function vsetTol() {
+  var d = await post('/voice/vtol?v=' + encodeURIComponent($('vtol').value));
   alert(d.msg);
 }
-$('wn').addEventListener('input', wchips);
-fetch('/voice/wprep', { method: 'POST' }).catch(function () {});
-wload();
+fetch('/voice/vprep', { method: 'POST' }).catch(function () {});
+vload();
 </script>
 </body>
 </html>
@@ -401,87 +345,74 @@ static esp_err_t tol_post(httpd_req_t *req)
     return send_simple(req, ok, ok ? "Toleransi tersimpan." : "Nilai harus 1.0 sampai 3.0.");
 }
 
-/* ---------- Kata harian ---------- */
-#define WREC_MS      2000
-#define WREC_SAMPLES (SPEAKER_ID_SAMPLE_RATE * WREC_MS / 1000)
+/* ---------- Warna suara ---------- */
+#define VREC_MS       20000
+#define VREC_SAMPLES  (SPEAKER_ID_SAMPLE_RATE * VREC_MS / 1000)
+#define VTEST_MS      4000
+#define VTEST_SAMPLES (SPEAKER_ID_SAMPLE_RATE * VTEST_MS / 1000)
 
-static esp_err_t wprep_post(httpd_req_t *req)
+static int16_t *s_vrec = nullptr;
+
+static int16_t *vrec_buffer(void)
+{
+    if (!s_vrec)
+        s_vrec = (int16_t *)heap_caps_malloc(VREC_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return s_vrec;
+}
+
+static esp_err_t vprep_post(httpd_req_t *req)
 {
     audio_hal_afe_init();   /* siapkan AFE sekali, supaya rekaman pertama tidak terlambat */
     return send_simple(req, true, "siap");
 }
 
-static esp_err_t wlist_get(httpd_req_t *req)
+static esp_err_t vlist_get(httpd_req_t *req)
 {
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "tol", (double)speaker_id_word_get_tolerance());
+    cJSON_AddNumberToObject(root, "tol", (double)speaker_vp_get_tolerance());
     cJSON *arr = cJSON_AddArrayToObject(root, "profiles");
-    for (int i = 0; i < speaker_id_word_profile_count(); ++i) {
+    for (int i = 0; i < speaker_vp_profile_count(); ++i) {
         char name[SPEAKER_ID_NAME_MAX + 1];
-        int n = 0;
-        if (!speaker_id_word_get_profile(i, name, sizeof(name), &n)) continue;
-        cJSON *p = cJSON_CreateObject();
-        cJSON_AddStringToObject(p, "name", name);
-        cJSON *words = cJSON_AddArrayToObject(p, "words");
-        for (int w = 0; w < n; ++w) {
-            char word[SPEAKER_WORD_NAME_MAX + 1];
-            if (speaker_id_word_get_word(i, w, word, sizeof(word)))
-                cJSON_AddItemToArray(words, cJSON_CreateString(word));
-        }
-        cJSON_AddItemToArray(arr, p);
+        if (speaker_vp_get_profile(i, name, sizeof(name)))
+            cJSON_AddItemToArray(arr, cJSON_CreateString(name));
     }
     return send_json(req, root);
 }
 
-static esp_err_t wrec_post(httpd_req_t *req)
+static esp_err_t vrec_post(httpd_req_t *req)
 {
     char name[96] = "";
-    char word[64] = "";
-    char step_text[8] = "";
-    if (!query_value(req, "name", name, sizeof(name)) || !query_value(req, "word", word, sizeof(word)))
+    if (!query_value(req, "name", name, sizeof(name)))
         return send_simple(req, false, speaker_id_status_text(SPEAKER_ID_ERR_NAME));
-    int step = 1;
-    if (query_value(req, "step", step_text, sizeof(step_text))) step = atoi(step_text);
-
-    int16_t *buf = rec_buffer();
+    int16_t *buf = vrec_buffer();
     if (!buf) return send_simple(req, false, speaker_id_status_text(SPEAKER_ID_ERR_NOMEM));
 
-    const size_t got = speaker_id_record_conv(buf, WREC_SAMPLES, WREC_MS + 2500);
-    int count = 0;
-    bool done = false;
-    const speaker_id_status_t st = speaker_id_word_enroll(name, word, step, buf, got, &count, &done);
-
-    cJSON *r = cJSON_CreateObject();
-    cJSON_AddBoolToObject(r, "ok", st == SPEAKER_ID_OK);
-    cJSON_AddNumberToObject(r, "count", count);
-    cJSON_AddBoolToObject(r, "done", done);
-    char msg[160];
-    if (st != SPEAKER_ID_OK) snprintf(msg, sizeof(msg), "%s", speaker_id_status_text(st));
-    else if (done) snprintf(msg, sizeof(msg), "tersimpan!");
-    else snprintf(msg, sizeof(msg), "rekaman %d/%d berhasil.", count, SPEAKER_WORD_SAMPLES);
-    cJSON_AddStringToObject(r, "msg", msg);
-    ESP_LOGI(TAG, "Rekam kata name=%s word=%s step=%d sampel=%u -> %s", name, word, step, (unsigned)got, msg);
-    return send_json(req, r);
+    const size_t got = speaker_id_record_conv(buf, VREC_SAMPLES, VREC_MS + 3000);
+    int frames = 0;
+    const speaker_id_status_t st = speaker_vp_enroll(name, buf, got, &frames);
+    char msg[200];
+    if (st == SPEAKER_ID_OK) snprintf(msg, sizeof(msg), "Warna suara %s tersimpan! (%d frame suara)", name, frames);
+    else snprintf(msg, sizeof(msg), "%s", speaker_id_status_text(st));
+    ESP_LOGI(TAG, "Rekam warna suara name=%s sampel=%u frame=%d -> %s", name, (unsigned)got, frames, msg);
+    return send_simple(req, st == SPEAKER_ID_OK, msg);
 }
 
-static esp_err_t wdel_post(httpd_req_t *req)
+static esp_err_t vdel_post(httpd_req_t *req)
 {
     char name[96] = "";
-    char word[64] = "";
     if (!query_value(req, "name", name, sizeof(name))) return send_simple(req, false, "Nama kosong.");
-    const bool has_word = query_value(req, "word", word, sizeof(word));
-    const bool ok = speaker_id_word_delete(name, has_word ? word : nullptr);
+    const bool ok = speaker_vp_delete(name);
     return send_simple(req, ok, ok ? "Dihapus." : "Tidak ditemukan.");
 }
 
-static esp_err_t wtest_post(httpd_req_t *req)
+static esp_err_t vtest_post(httpd_req_t *req)
 {
-    int16_t *buf = rec_buffer();
+    int16_t *buf = vrec_buffer();
     if (!buf) return send_simple(req, false, speaker_id_status_text(SPEAKER_ID_ERR_NOMEM));
 
-    const size_t got = speaker_id_record_conv(buf, REC_SAMPLES, REC_MS + 2500);
-    speaker_word_result_t res;
-    const speaker_id_status_t st = speaker_id_word_identify(buf, got, &res);
+    const size_t got = speaker_id_record_conv(buf, VTEST_SAMPLES, VTEST_MS + 3000);
+    speaker_vp_result_t res;
+    const speaker_id_status_t st = speaker_vp_identify(buf, got, &res);
     if (st != SPEAKER_ID_OK) return send_simple(req, false, speaker_id_status_text(st));
 
     cJSON *r = cJSON_CreateObject();
@@ -489,25 +420,24 @@ static esp_err_t wtest_post(httpd_req_t *req)
     cJSON_AddBoolToObject(r, "known", res.known);
     cJSON_AddBoolToObject(r, "ambiguous", res.ambiguous);
     cJSON_AddStringToObject(r, "name", res.name);
-    cJSON_AddStringToObject(r, "word", res.word);
-    cJSON_AddNumberToObject(r, "tol", (double)speaker_id_word_get_tolerance());
+    cJSON_AddNumberToObject(r, "tol", (double)speaker_vp_get_tolerance());
+    cJSON_AddNumberToObject(r, "frames", res.frames);
     cJSON *arr = cJSON_AddArrayToObject(r, "scores");
     for (int i = 0; i < res.score_count; ++i) {
         cJSON *x = cJSON_CreateObject();
         cJSON_AddStringToObject(x, "name", res.scores[i].name);
-        cJSON_AddStringToObject(x, "word", res.scores[i].word);
         cJSON_AddNumberToObject(x, "ratio", (double)res.scores[i].ratio);
         cJSON_AddItemToArray(arr, x);
     }
     return send_json(req, r);
 }
 
-static esp_err_t wtol_post(httpd_req_t *req)
+static esp_err_t vtol_post(httpd_req_t *req)
 {
     char value[16] = "";
     if (!query_value(req, "v", value, sizeof(value))) return send_simple(req, false, "Nilai kosong.");
-    const bool ok = speaker_id_word_set_tolerance(strtof(value, nullptr));
-    return send_simple(req, ok, ok ? "Batas kata tersimpan." : "Nilai harus 1.0 sampai 3.0.");
+    const bool ok = speaker_vp_set_tolerance(strtof(value, nullptr));
+    return send_simple(req, ok, ok ? "Batas warna suara tersimpan." : "Nilai harus 1.0 sampai 3.0.");
 }
 
 extern "C" void speaker_id_web_register(void *httpd_handle)
@@ -523,12 +453,12 @@ extern "C" void speaker_id_web_register(void *httpd_handle)
         {"/voice/test", HTTP_POST, test_post},
         {"/voice/del",  HTTP_POST, del_post},
         {"/voice/tol",  HTTP_POST, tol_post},
-        {"/voice/wprep", HTTP_POST, wprep_post},
-        {"/voice/wlist", HTTP_GET,  wlist_get},
-        {"/voice/wrec",  HTTP_POST, wrec_post},
-        {"/voice/wdel",  HTTP_POST, wdel_post},
-        {"/voice/wtest", HTTP_POST, wtest_post},
-        {"/voice/wtol",  HTTP_POST, wtol_post},
+        {"/voice/vprep", HTTP_POST, vprep_post},
+        {"/voice/vlist", HTTP_GET,  vlist_get},
+        {"/voice/vrec",  HTTP_POST, vrec_post},
+        {"/voice/vdel",  HTTP_POST, vdel_post},
+        {"/voice/vtest", HTTP_POST, vtest_post},
+        {"/voice/vtol",  HTTP_POST, vtol_post},
     };
     for (const Route &r : routes) {
         httpd_uri_t uri = {};
