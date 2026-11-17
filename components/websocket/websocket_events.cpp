@@ -159,6 +159,11 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
              * its lifecycle. A separate manager task may now destroy client. */
             websocket_finish_received = true;
             websocket_cleanup_pending = true;
+            /* FINISH tanpa ERROR/DISCONNECTED/CLOSED sebelumnya (mis. koneksi mati saat
+             * setup dikirim): tanpa baris ini tidak ada yang menjadwalkan sambung ulang,
+             * lalu sesi berakhir setelah 15 detik. Fungsi ini aman: ia melewati sendiri
+             * kasus standby/sesi baru dan kasus yang sudah dijadwalkan. */
+            websocket_request_resume_reconnect();
             websocket_reset_started();
             break;
 
