@@ -1,4 +1,4 @@
-name: Repo5-compatible ESP32-S3 firmware
+name: ESP32-S3 firmware
 
 on:
   push:
