@@ -23,3 +23,7 @@ bool websocket_send_alarm_prompt(int hour, int minute, const char *label);
 // Beri tahu Gemini siapa yang bicara (hasil pengenal suara) agar ia menyapa dengan nama.
 // Dipanggil hanya untuk suara yang DIKENAL. Suara tidak dikenal: jangan panggil (tidak disapa).
 bool websocket_send_speaker_context(const char *name);
+
+// Pembicara dikenali di tengah obrolan (dari kata harian). Gemini hanya diberi tahu
+// namanya, tanpa menyapa ulang.
+bool websocket_send_speaker_update(const char *name);
