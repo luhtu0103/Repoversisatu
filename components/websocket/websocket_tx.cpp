@@ -208,3 +208,43 @@ bool websocket_send_speaker_context(const char *name)
     ESP_LOGI(TAG, "Konteks pembicara masuk antrean TX: %s", safe);
     return true;
 }
+
+bool websocket_send_speaker_update(const char *name)
+{
+    if (!name || !name[0]) return false;
+    if (!websocket_is_connected() || !websocket_tx_queue) return false;
+
+    char safe[64];
+    size_t j = 0;
+    for (const unsigned char *p = (const unsigned char *)name; *p && j + 1 < sizeof(safe); ++p) {
+        if (*p >= 0x20 && *p != 0x7F && *p != '"' && *p != '\\') safe[j++] = (char)*p;
+    }
+    safe[j] = '\0';
+    if (j == 0) return false;
+
+    char json[512];
+    int n = snprintf(json, sizeof(json),
+        "{\"clientContent\":{\"turns\":[{\"role\":\"user\",\"parts\":[{\"text\":"
+        "\"[Sistem, jangan dibalas] Pengenal suara perangkat mengenali bahwa yang sedang bicara sekarang adalah %s. "
+        "Panggil dia %s bila perlu. Jangan mengucapkan apa pun untuk pesan sistem ini; "
+        "lanjutkan percakapan seperti biasa.\"}]}],\"turnComplete\":true}}",
+        safe, safe);
+    if (n <= 0 || (size_t)n >= sizeof(json)) return false;
+
+    uint8_t *copy = (uint8_t *)malloc((size_t)n);
+    if (!copy) return false;
+    memcpy(copy, json, (size_t)n);
+    ws_tx_command_t cmd = {};
+    cmd.type = WS_TX_COMMAND_TEXT;
+    cmd.generation = websocket_connection_generation;
+    cmd.len = (uint16_t)n;
+    cmd.data = copy;
+    if (xQueueSend(websocket_tx_queue, &cmd, 0) != pdTRUE) {
+        websocket_set_backpressured(true);
+        free(copy);
+        ESP_LOGW(TAG, "Pembaruan pembicara ditahan: TX queue penuh");
+        return false;
+    }
+    ESP_LOGI(TAG, "Pembaruan pembicara masuk antrean TX: %s", safe);
+    return true;
+}
