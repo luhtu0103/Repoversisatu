@@ -54,7 +54,7 @@ static void touch_task(void *arg)
                     touch_window_start_us = 0;
                     long_sent = true;
                     if (face_get_state() != FACE_SPEAKING) {
-                        emotion_previous = face_get_state();
+                        if (emotion_until_us == 0) emotion_previous = face_get_state();
                         face_set_state(FACE_ANGRY);
                         if (websocket_is_connected()) websocket_send_touch_prompt(true);
                         emotion_until_us = now + (int64_t)EMOTION_MS * 1000LL;
@@ -73,7 +73,7 @@ static void touch_task(void *arg)
             touch_count = 0;
             touch_window_start_us = 0;
             if (face_get_state() != FACE_SPEAKING) {
-                emotion_previous = face_get_state();
+                if (emotion_until_us == 0) emotion_previous = face_get_state();
                 face_set_state(FACE_HAPPY);
                 if (websocket_is_connected()) websocket_send_touch_prompt(false);
                 emotion_until_us = now + (int64_t)EMOTION_MS * 1000LL;
