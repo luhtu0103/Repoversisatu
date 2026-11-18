@@ -32,6 +32,7 @@
 #include <time.h>
 
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <netdb.h>
@@ -251,11 +252,11 @@ static void speaker_id_worker_task(void *arg)
                 bool changed = false;
                 portENTER_CRITICAL(&speaker_context_mux);
                 if (job->seq == speaker_session_seq) {
-                    if (strcmp(vr.name, speaker_current_name) == 0) {
+                    if (strcasecmp(vr.name, speaker_current_name) == 0) {
                         speaker_candidate_count = 0;          // sama dengan yang sudah diberitahukan
                         speaker_candidate_name[0] = '\0';
                     } else {
-                        if (strcmp(vr.name, speaker_candidate_name) == 0) {
+                        if (strcasecmp(vr.name, speaker_candidate_name) == 0) {
                             ++speaker_candidate_count;
                         } else {
                             strlcpy(speaker_candidate_name, vr.name, sizeof(speaker_candidate_name));
@@ -777,7 +778,7 @@ static void audio_task(void *arg)
             bool has_change = false;
             portENTER_CRITICAL(&speaker_context_mux);
             has_change = speaker_change_pending;
-            if (has_change && strcmp(speaker_change_name, speaker_current_name) == 0) {
+            if (has_change && strcasecmp(speaker_change_name, speaker_current_name) == 0) {
                 speaker_change_pending = false;   // sudah diberitahukan (mis. lewat sapaan Hi ESP)
                 has_change = false;
             }
