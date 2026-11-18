@@ -158,6 +158,9 @@ static void draw_wita_clock() {
     draw_line(4, 44, clock_text, strlen(clock_text));
 }
 
+static uint8_t sent_frame[OLED_WIDTH * OLED_HEIGHT / 8];
+static bool sent_valid = false;
+
 static void render_text_locked() {
     memset(frame, 0, sizeof(frame));
 
@@ -192,9 +195,16 @@ static void render_text_locked() {
 
     // Keep the live audio equalizer at the bottom of the display.
     draw_audio_equalizer();
-    if (panel2) {
+    // Frame sama dengan yang terakhir dikirim: tidak perlu kirim ulang lewat I2C.
+    if (panel2 && !(sent_valid && memcmp(sent_frame, frame, sizeof(frame)) == 0)) {
         const esp_err_t err = esp_lcd_panel_draw_bitmap(panel2, 0, 0, OLED_WIDTH, OLED_HEIGHT, frame);
-        if (err != ESP_OK) ESP_LOGW(TAG, "OLED2 text draw gagal: %s", esp_err_to_name(err));
+        if (err != ESP_OK) {
+            sent_valid = false;
+            ESP_LOGW(TAG, "OLED2 text draw gagal: %s", esp_err_to_name(err));
+        } else {
+            memcpy(sent_frame, frame, sizeof(frame));
+            sent_valid = true;
+        }
     }
 }
 
@@ -265,7 +275,8 @@ static void update_text_safely(char *dst, size_t size, const char *text, bool ap
             if (dst == user_text) user_scroll_offset = 0;
             else if (dst == gemini_text) gemini_scroll_offset = 0;
         }
-        render_text_locked();
+        // Tidak menggambar di sini: task oled2_text_scroll menggambar tiap 90 ms.
+        // Dengan begitu task pemanggil (ws_rx) tidak menunggu I2C ~25 ms.
         xSemaphoreGive(draw_mutex);
         ESP_LOGD(TAG, "Teks OLED2 diperbarui: %s", dst == user_text ? "USER" : "GEMINI");
         return;
@@ -303,7 +314,6 @@ extern "C" void oled2_face_set_status(const char *status) {
         if (xSemaphoreTake(draw_mutex, pdMS_TO_TICKS(250)) != pdTRUE) return;
         copy_text(device_status, sizeof(device_status), status);
         device_status_scroll_offset = 0;
-        render_text_locked();
         xSemaphoreGive(draw_mutex);
     } else {
         copy_text(device_status, sizeof(device_status), status);
@@ -487,7 +497,7 @@ extern "C" void oled2_face_init(void) {
     }
     ready2 = true;
     render_text();
-    if (xTaskCreate(transcript_scroll_task, "oled2_text_scroll", 3072, nullptr, 2, nullptr) != pdPASS) {
+    if (xTaskCreate(transcript_scroll_task, "oled2_text_scroll", 4096, nullptr, 2, nullptr) != pdPASS) {
         ESP_LOGW(TAG, "Task scroll teks OLED2 gagal dibuat");
     }
     if (xTaskCreate(network_status_task, "oled2_net_status", 4096, nullptr, 2, nullptr) != pdPASS) {
