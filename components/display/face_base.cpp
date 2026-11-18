@@ -182,28 +182,28 @@ static void draw_mouth(int expr, int step, int motion)
     }
 
     switch (expr) {
-        case 10: { // ð³ subtle surprised-mouth pulse, synchronized with brow motion
+        case 10: { // subtle surprised-mouth pulse, synchronized with brow motion
             const int ry = (motion == 1 || motion == 2) ? 5 : 3;
             fill_ellipse(64, 51, 3, ry, true);
             fill_ellipse(64, 51, 1, ry > 3 ? 2 : 1, false);
             return;
         }
-        case 11: // ð¥º tiny pleading pout gently trembles
+        case 11: // tiny pleading pout gently trembles
             line(60, 51 + ((motion == 1) ? 1 : 0), 64, 53, 2);
             line(64, 53, 68, 51 + ((motion == 1) ? 1 : 0), 2);
             return;
-        case 12: // ð¤¨ restrained, straight skeptical mouth
+        case 12: // restrained, straight skeptical mouth
             line(59, 52 + ((motion == 2) ? 1 : 0), 69, 52, 2);
             return;
-        case 13: // ð crooked half-smile lifts slightly at the corner
+        case 13: // crooked half-smile lifts slightly at the corner
             line(56, 52, 63, 52, 2);
             line(63, 52, 70, 49 - ((motion == 1 || motion == 2) ? 1 : 0), 2);
             line(70, 49 - ((motion == 1 || motion == 2) ? 1 : 0), 74, 49 - ((motion == 1 || motion == 2) ? 1 : 0), 2);
             return;
-        case 14: // ð flat, unimpressed mouth
+        case 14: // flat, unimpressed mouth
             line(59, 52, 69, 52, 2);
             return;
-        case 15: // ð worried mouth trembles by one pixel
+        case 15: // worried mouth trembles by one pixel
             line(58, 49, 64, 53 + ((motion == 1) ? 1 : 0), 2);
             line(64, 53 + ((motion == 1) ? 1 : 0), 70, 49, 2);
             return;
