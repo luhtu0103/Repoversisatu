@@ -14,18 +14,26 @@ static SemaphoreHandle_t anim_start_mutex = NULL;
 // Temporarily override one of the three supported face states.
 // Animation sequences remain in face_animation.cpp.
 static face_state_t face_override_previous = FACE_SLEEP;
+static face_state_t face_override_state = FACE_SLEEP;
 static int64_t face_override_until_us = 0;
 static portMUX_TYPE face_override_mux = portMUX_INITIALIZER_UNLOCKED;
 
 void face_show_for_ms(face_state_t state, uint32_t duration_ms)
 {
-    const face_state_t previous = face_get_state();
+    face_state_t previous = face_get_state();
     const int64_t until_us = duration_ms == 0
         ? 0
         : esp_timer_get_time() + ((int64_t)duration_ms * 1000LL);
 
     portENTER_CRITICAL(&face_override_mux);
+    // Jika override lama masih aktif, state "sebelumnya" yang asli tetap dipakai
+    // supaya wajah tidak terkunci di SENANG/MARAH.
+    if (face_override_until_us > 0 &&
+        (previous == FACE_HAPPY || previous == FACE_ANGRY)) {
+        previous = face_override_previous;
+    }
     face_override_previous = previous;
+    face_override_state = state;
     face_override_until_us = until_us;
     portEXIT_CRITICAL(&face_override_mux);
 
@@ -45,6 +53,7 @@ static void face_controller_task(void *arg)
 
     while (1) {
         face_state_t restore_state = FACE_SLEEP;
+        face_state_t expected_state = FACE_SLEEP;
         bool should_restore = false;
         const int64_t now_us = esp_timer_get_time();
 
@@ -52,13 +61,18 @@ static void face_controller_task(void *arg)
         if (face_override_until_us > 0 && now_us >= face_override_until_us) {
             face_override_until_us = 0;
             restore_state = face_override_previous;
+            expected_state = face_override_state;
             should_restore = true;
         }
         portEXIT_CRITICAL(&face_override_mux);
 
         if (should_restore) {
-            face_set_state(restore_state);
-            ESP_LOGI(TAG, "FACE TOOL selesai; restore state=%d", (int)restore_state);
+            // Kembalikan hanya jika wajah masih di state override. Kalau sudah
+            // berganti (misalnya robot mulai bicara), jangan ditimpa.
+            if (face_get_state() == expected_state) {
+                face_set_state(restore_state);
+                ESP_LOGI(TAG, "FACE TOOL selesai; restore state=%d", (int)restore_state);
+            }
         }
 
         face_animation_run_state(face_get_state());
