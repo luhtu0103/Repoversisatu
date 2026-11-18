@@ -52,6 +52,23 @@ void display_render_mochi_gaze(
     int eye_shift_y
 );
 
+// Same as above plus living-face controls:
+// lid: eyelid closure 0 (open) .. 100 (closed); jitter_x/jitter_y: tiny pupil
+// micro-movements (-1..1) that do not move the eye shapes.
+void display_render_mochi_lid(
+    int expr,
+    int step,
+    int sX,
+    int sY,
+    int gaze_x,
+    int gaze_y,
+    int eye_shift_x,
+    int eye_shift_y,
+    int lid,
+    int jitter_x,
+    int jitter_y
+);
+
 void face_animation_start(void);
 void face_animation_stop(void);
 void face_set_state(face_state_t state);
