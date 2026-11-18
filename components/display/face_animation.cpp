@@ -1,6 +1,8 @@
 #include "display.h"
 #include "display_internal.h"
 #include "servo_head.h"
+#include <math.h>
+#include <stdlib.h>
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -30,6 +32,8 @@ static int transition_to_y = 0;
 static uint32_t seen_gaze_revision = UINT32_MAX;
 static uint32_t transition_start_tick = 0;
 static uint32_t transition_duration_ms = 0;
+static int prev_eye_x = 0;
+static int prev_eye_y = 0;
 
 static void render(
     int expr,
@@ -44,6 +48,7 @@ static void render(
     // All face states use the servo's shared direction as the only gaze source.
     // Interpolate over the same duration as the servo pulse (85/90 ms automatic,
     // 300 ms manual) so OLED1 follows the actual command timing.
+    bool revision_changed_big = false;
     int target_x = 0;
     int target_y = 0;
     uint32_t duration_ms = 0;
@@ -58,6 +63,9 @@ static void render(
             transition_start_tick = start_tick;
             transition_duration_ms = duration_ms;
             seen_gaze_revision = revision;
+            revision_changed_big =
+                (abs(transition_to_x - transition_from_x) >= 2 ||
+                 abs(transition_to_y - transition_from_y) >= 2);
         }
 
         const uint32_t elapsed_ticks =
@@ -86,15 +94,110 @@ static void render(
     eye_shift_x = gaze_x * 2;
     eye_shift_y = gaze_y * 2;
 
-    display_render_mochi_gaze(
-        expr,
-        step,
-        sx,
-        sy,
-        gaze_x,
-        gaze_y,
-        eye_shift_x,
-        eye_shift_y
+    // ---- "Hidup": kedip halus, mata bergetar kecil, napas, angguk ----
+    // Semua ini hanya mengubah kelopak, pupil 1 piksel, dan posisi 1 piksel.
+    // Arah pandang (gaze) tetap dari servo, jadi mata dan servo tetap selaras.
+    const TickType_t now = xTaskGetTickCount();
+    const bool sleeping = (step == 3);
+
+    // Kelopak: target 100 saat tidur, 0 saat bangun. Menutup pelan, membuka lebih cepat.
+    static float lid_base = 100.0f;
+    const float lid_goal = sleeping ? 100.0f : 0.0f;
+    if (lid_base < lid_goal)      lid_base = fminf(lid_goal, lid_base + 14.0f);
+    else if (lid_base > lid_goal) lid_base = fmaxf(lid_goal, lid_base - 30.0f);
+
+    // Kedip: bentuk sinus 0 -> 100 -> 0 selama ~210 ms, kadang kedip dobel.
+    static TickType_t blink_start = 0;
+    static TickType_t next_blink = 0;
+    static bool blink_active = false;
+    static bool double_pending = false;
+    static face_state_t last_state = FACE_SLEEP;
+
+    const face_state_t cur_state = face_get_state();
+    if (cur_state != last_state) {
+        last_state = cur_state;
+        blink_active = false;
+        double_pending = false;
+        next_blink = now + pdMS_TO_TICKS(
+            cur_state == FACE_SPEAKING ? 2600 + rnd(2600) : 1800 + rnd(3000));
+    }
+    if (next_blink == 0) next_blink = now + pdMS_TO_TICKS(2000 + rnd(2500));
+
+    // Pandangan berpindah jauh -> orang biasanya berkedip.
+    if (revision_changed_big && !blink_active && !sleeping && rnd(100) < 35) {
+        blink_active = true;
+        blink_start = now;
+    }
+
+    float blink_lid = 0.0f;
+    if (!sleeping) {
+        if (!blink_active && (int32_t)(now - next_blink) >= 0) {
+            blink_active = true;
+            blink_start = now;
+        }
+        if (blink_active) {
+            const float t = (float)(now - blink_start) / (float)pdMS_TO_TICKS(210);
+            if (t >= 1.0f) {
+                blink_active = false;
+                if (double_pending) {
+                    double_pending = false;
+                    next_blink = now + pdMS_TO_TICKS(120);   // kedip kedua cepat
+                } else {
+                    double_pending = (rnd(100) < 18);        // kadang kedip dobel
+                    next_blink = now + pdMS_TO_TICKS(
+                        (cur_state == FACE_SPEAKING ? 2800 : 1800) + rnd(3400));
+                    if (double_pending) next_blink = now + pdMS_TO_TICKS(130);
+                }
+            } else {
+                blink_lid = 100.0f * sinf(t * 3.14159265f);
+            }
+        }
+    } else {
+        blink_active = false;
+    }
+
+    int lid = (int)fmaxf(lid_base, blink_lid);
+    if (sleeping && lid_base < 98.0f) {
+        step = 0;               // sedang menutup mata: kelopak turun dulu, baru garis tidur
+    }
+
+    // Getar pupil: loncat kecil 1 piksel setiap 0.4 - 1.5 detik (hanya pupil).
+    static int jit_x = 0, jit_y = 0;
+    static TickType_t next_jit = 0;
+    if ((int32_t)(now - next_jit) >= 0) {
+        const int r = (int)rnd(10);
+        jit_x = (r < 3) ? -1 : (r < 6 ? 1 : 0);
+        jit_y = (rnd(10) < 2) ? (rnd(2) ? 1 : -1) : 0;
+        next_jit = now + pdMS_TO_TICKS(400 + rnd(1100));
+    }
+    // Saat mata sedang bergerak mengikuti servo, jangan ditambah getar.
+    const bool moving = (eye_shift_x != prev_eye_x) || (eye_shift_y != prev_eye_y);
+    prev_eye_x = eye_shift_x;
+    prev_eye_y = eye_shift_y;
+    const int jx = (sleeping || moving) ? 0 : jit_x;
+    const int jy = (sleeping || moving) ? 0 : jit_y;
+
+    // Napas: seluruh wajah turun 1 piksel pelan-pelan (siklus ~4.4 detik).
+    int bob = 0;
+    if (!sleeping) {
+        bob = (sinf((float)(now * portTICK_PERIOD_MS) * (6.2831853f / 4400.0f)) > 0.35f) ? 1 : 0;
+    }
+    // Angguk kecil saat suara keras (dengan histeresis supaya tidak berkedip-kedip).
+    static bool loud = false;
+    if (expr == 2 && !sleeping) {
+        const int lv = face_get_speech_level();
+        if (!loud && lv > 150) loud = true;
+        else if (loud && lv < 90) loud = false;
+    } else {
+        loud = false;
+    }
+    sy += bob + (loud ? 1 : 0);
+
+    display_render_mochi_lid(
+        expr, step, sx, sy,
+        gaze_x, gaze_y,
+        eye_shift_x, eye_shift_y,
+        lid, jx, jy
     );
 }
 
@@ -121,37 +224,6 @@ static bool hold_render(face_state_t state,
     return state_ok(state);
 }
 
-// Non-blocking blink scheduler: never pauses gaze updates while the servo moves.
-static int scheduled_blink_step(face_state_t state)
-{
-    static face_state_t last_state = FACE_SLEEP;
-    static TickType_t next_blink = 0;
-    static TickType_t blink_started = 0;
-
-    const TickType_t now = xTaskGetTickCount();
-    if (state != last_state) {
-        last_state = state;
-        blink_started = 0;
-        next_blink = now + pdMS_TO_TICKS(
-            state == FACE_SPEAKING ? 3200 + rnd(2600) : 1800 + rnd(3000));
-    }
-
-    if (blink_started != 0) {
-        const TickType_t elapsed = now - blink_started;
-        if (elapsed < pdMS_TO_TICKS(75)) return 1;
-        if (elapsed < pdMS_TO_TICKS(130)) return 2;
-        blink_started = 0;
-        next_blink = now + pdMS_TO_TICKS(
-            state == FACE_SPEAKING ? 3500 + rnd(3000) : 1800 + rnd(3000));
-    }
-
-    if ((int32_t)(now - next_blink) >= 0) {
-        blink_started = now;
-        return 1;
-    }
-    return 0;
-}
-
 static void thinking_sequence(void)
 {
     if (!state_ok(FACE_THINKING)) return;
@@ -174,8 +246,7 @@ static void thinking_sequence(void)
         const TickType_t duration = pdMS_TO_TICKS(hold_ms);
         while ((xTaskGetTickCount() - start) < duration) {
             if (!state_ok(FACE_THINKING)) return;
-            const int blink_step = scheduled_blink_step(FACE_THINKING);
-            render(moods[mood], blink_step, 0, 0, 0, 0);
+            render(moods[mood], 0, 0, 0, 0, 0);
             vTaskDelay(FRAME_DELAY);
         }
     }
@@ -186,8 +257,7 @@ static void speaking_sequence(void)
     // Gaze is shared with the servo controller; blink frames are non-blocking.
     if (!state_ok(FACE_SPEAKING)) return;
 
-    const int blink_step = scheduled_blink_step(FACE_SPEAKING);
-    render(2, blink_step, 0, 0, 0, 0);
+    render(2, 0, 0, 0, 0, 0);
     vTaskDelay(FRAME_DELAY);
 }
 
