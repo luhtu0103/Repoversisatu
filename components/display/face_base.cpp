@@ -11,6 +11,7 @@
 // Keep the existing XiaoZhi display driver and the three public face states.
 static int g_draw_offset_x = 0;
 static int g_draw_offset_y = 0;
+static float s_mouth_open = 0.0f;   // 0..255, dihaluskan: cepat naik, pelan turun
 
 static void pixel(int x, int y, bool on = true)
 {
@@ -81,7 +82,8 @@ static void draw_closed_eye(int cx, int cy, bool sleeping)
 }
 
 static void draw_eye(int expr, int cx, int cy, int gaze_x, int gaze_y,
-                     int eye_shift_x, int eye_shift_y, int step)
+                     int eye_shift_x, int eye_shift_y, int step,
+                     int lid, int jitter_x, int jitter_y)
 {
     cx += eye_shift_x;
     cy += eye_shift_y;
@@ -93,6 +95,10 @@ static void draw_eye(int expr, int cx, int cy, int gaze_x, int gaze_y,
     if (step == 1 || step == 2) {
         draw_closed_eye(cx, cy, false);
         if (step == 2) line(cx - 14, cy - 2, cx + 14, cy - 2, 1);
+        return;
+    }
+    if (lid >= 92) {                 // kelopak hampir tertutup penuh: pakai garis kelopak
+        draw_closed_eye(cx, cy, false);
         return;
     }
 
@@ -113,8 +119,9 @@ static void draw_eye(int expr, int cx, int cy, int gaze_x, int gaze_y,
     }
     fill_ellipse(cx, cy, eye_rx, eye_ry, true);
 
-    const int gx = clamp_int(gaze_x, -7, 7);
-    const int gy = clamp_int(gaze_y, -5, 5);
+    // Pupil follows the shared gaze; jitter adds tiny natural eye micro-movements.
+    const int gx = clamp_int(gaze_x + jitter_x, -8, 8);
+    const int gy = clamp_int(gaze_y + jitter_y, -6, 6);
     const int pupil_radius = (expr == 10 || expr == 11) ? 5 : 6;
     const int px = cx + gx;
     const int py = cy + gy;
@@ -124,6 +131,19 @@ static void draw_eye(int expr, int cx, int cy, int gaze_x, int gaze_y,
     pixel(px - 1, py - 3, true);
     pixel(px - 2, py - 2, true);
     fill_circle(px + 2, py + 2, 1, true);
+
+    if (lid > 0) {
+        // Eyelids: the upper lid comes down quickly, the lower lid rises more slowly.
+        // At lid=100 both meet at the closed-eye line (cy+3), so there is no jump
+        // when the sprite switches to draw_closed_eye().
+        const float l = (float)lid / 100.0f;
+        const int y_top = cy - eye_ry + (int)((float)(eye_ry + 3) * l);
+        const int y_bot = cy + eye_ry - (int)((float)(eye_ry - 3) * l * l);
+        for (int x = cx - eye_rx - 1; x <= cx + eye_rx + 1; ++x) {
+            for (int y = cy - eye_ry - 1; y < y_top; ++y) pixel(x, y, false);
+            for (int y = y_bot + 1; y <= cy + eye_ry + 1; ++y) pixel(x, y, false);
+        }
+    }
 }
 
 static void draw_smile(void)
@@ -187,25 +207,25 @@ static void draw_mouth(int expr, int step, int motion)
             line(58, 49, 64, 53 + ((motion == 1) ? 1 : 0), 2);
             line(64, 53 + ((motion == 1) ? 1 : 0), 70, 49, 2);
             return;
-        case 2: { // Mouth opening follows the actual outgoing PCM level.
-            const uint8_t level = face_get_speech_level();
-            // Quiet frames keep the mouth nearly closed; louder syllables open
-            // progressively. A small time variation prevents a rigid "meter" look.
-            if (level < 12) {
+        case 2: { // Mouth opening follows the (smoothed) outgoing PCM level.
+            const float o = s_mouth_open;
+            if (o < 10.0f) {                       // quiet: nearly closed, tiny smile
                 line(59, 50, 69, 50, 2);
-            } else if (level < 42) {
-                line(59, 50, 64, 52, 2);
-                line(64, 52, 69, 50, 2);
-            } else if (level < 88) {
-                line(59, 49, 64, 53, 2);
-                line(64, 53, 69, 49, 2);
-            } else if (level < 150) {
-                fill_ellipse(64, 51, 4, 3, true);
-                fill_ellipse(64, 51, 2, 1, false);
-            } else {
-                const int pulse = (int)((esp_timer_get_time() / 120000LL) % 2LL);
-                fill_ellipse(64, 51, 5, pulse ? 4 : 3, true);
-                fill_ellipse(64, 51, 2, 1, false);
+                return;
+            }
+            const float k = o / 255.0f;
+            // sqrt keeps quiet syllables visible, loud ones reach the full opening.
+            const int ry = 1 + (int)(4.5f * sqrtf(k) + 0.5f);
+            // Slow width wobble imitates changing vowels (o / a / e), never a rigid meter.
+            const float wob = sinf((float)(esp_timer_get_time() / 1000LL) * 0.011f);
+            int rx = 4 + (int)(1.4f * wob + (wob >= 0.0f ? 0.5f : -0.5f));
+            if (rx < 3) rx = 3;
+            if (ry <= 2) {                          // small opening: soft open curve
+                line(64 - rx - 1, 50, 64, 50 + ry, 2);
+                line(64, 50 + ry, 64 + rx + 1, 50, 2);
+            } else {                                // open mouth outline
+                fill_ellipse(64, 51, rx, ry, true);
+                fill_ellipse(64, 51, rx - 2 > 1 ? rx - 2 : 1, ry - 2, false);
             }
             return;
         }
@@ -224,14 +244,15 @@ static void draw_mouth(int expr, int step, int motion)
 // Shared face layer: stable eye anchors and consistent geometry across states.
 static void draw_base_face(int expr, int step, int sX, int sY, int eye_y,
                            int gaze_x, int gaze_y,
-                           int eye_shift_x, int eye_shift_y, int motion)
+                           int eye_shift_x, int eye_shift_y, int motion,
+                           int lid, int jitter_x, int jitter_y)
 {
     // Eyes and mouth are facial anatomy: keep them in the shared face pass.
     // Expression parameters alter their shape, never swap the face identity.
     draw_eye(expr, 35 + sX, eye_y, gaze_x, gaze_y,
-             eye_shift_x, eye_shift_y, step);
+             eye_shift_x, eye_shift_y, step, lid, jitter_x, jitter_y);
     draw_eye(expr, 93 + sX, eye_y, gaze_x, gaze_y,
-             eye_shift_x, eye_shift_y, step);
+             eye_shift_x, eye_shift_y, step, lid, jitter_x, jitter_y);
     // Mouth follows the same face translation as the eyes (including sleep breathing).
     // Apply the offset only for mouth drawing so the sleep Z overlay stays anchored.
     g_draw_offset_x = sX;
@@ -247,28 +268,38 @@ static void draw_expression_overlay(int step)
     if (step == 3) draw_sleep_zs();
 }
 
-void display_render_mochi_gaze(
+void display_render_mochi_lid(
     int expr, int step, int sX, int sY, int gaze_x, int gaze_y,
-    int eye_shift_x, int eye_shift_y)
+    int eye_shift_x, int eye_shift_y, int lid, int jitter_x, int jitter_y)
 {
     oled_init();
     display_clear_framebuffer();
+
+    // Smooth the mouth opening once per rendered frame: fast attack, slower release.
+    const float target = (expr == 2 && step != 3) ? (float)face_get_speech_level() : 0.0f;
+    s_mouth_open += (target - s_mouth_open) * (target > s_mouth_open ? 0.65f : 0.30f);
 
     const int eye_y = 25 + sY;
     // Shared base-face layer: eye placement and mouth position share the same
     // translation across states. State animation supplies expression and gaze.
     const int motion = (int)((esp_timer_get_time() / 220000LL) % 4LL);
-    // Draw the permanent face anatomy first. Every state uses these same eye
-    // anchors and the same mouth anchor. Do not add expression-specific gaze
-    // offsets here; that would conflict with the shared servo gaze direction.
     draw_base_face(expr, step, sX, sY, eye_y, gaze_x, gaze_y,
-                   eye_shift_x, eye_shift_y, motion);
+                   eye_shift_x, eye_shift_y, motion,
+                   clamp_int(lid, 0, 100), jitter_x, jitter_y);
 
     // Expressions are overlays on that face: mouth shape and sleep symbols can
     // change, while the face identity and its layout remain stable.
     draw_expression_overlay(step);
 
     display_render_buffer(display_framebuffer());
+}
+
+void display_render_mochi_gaze(
+    int expr, int step, int sX, int sY, int gaze_x, int gaze_y,
+    int eye_shift_x, int eye_shift_y)
+{
+    display_render_mochi_lid(expr, step, sX, sY, gaze_x, gaze_y,
+                             eye_shift_x, eye_shift_y, 0, 0, 0);
 }
 
 void display_render_mochi(int expr, int step, int sX, int sY, int arahLirik)
