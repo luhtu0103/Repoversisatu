@@ -86,8 +86,9 @@ void check_audio_playback_complete(void)
     if (xStreamBufferBytesAvailable(audio_stream) != 0) return;
     audio_turn_complete_pending = false;
     audio_turn_active = false;
-    // Let the I2S DMA speaker tail drain before reopening the microphone.
-    vTaskDelay(pdMS_TO_TICKS(70));
+    // Let the I2S DMA speaker tail drain and the room echo fade before reopening
+    // the microphone; 70 ms was too short and the robot heard its own tail.
+    vTaskDelay(pdMS_TO_TICKS(300));
     // A new server turn may arrive during the drain delay. Keep the mic muted
     // if playback has already resumed or new PCM is queued.
     if (audio_turn_active || xStreamBufferBytesAvailable(audio_stream) != 0) return;
