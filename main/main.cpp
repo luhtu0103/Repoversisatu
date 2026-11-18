@@ -641,7 +641,7 @@ static void audio_task(void *arg)
         if (!assistant_active) {
             portENTER_CRITICAL(&speaker_context_mux);
             speaker_context_pending = false;  // sesi lama selesai; jangan bawa nama ke sesi berikutnya
-            speaker_session_seq++;            // hasil worker yang terlambat jadi basi
+            speaker_session_seq = speaker_session_seq + 1; // hasil worker yang terlambat jadi basi
             speaker_change_pending = false;
             speaker_current_name[0] = '\0';
             speaker_candidate_name[0] = '\0';
