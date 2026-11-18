@@ -9,7 +9,8 @@ extern "C" {
 // Failure is non-fatal: OLED #1 and the AI pipeline remain available.
 void oled2_face_init(void);
 
-// OLED2 menampilkan RSSI Wi-Fi dan latensi TCP ke endpoint Gemini di baris atas.\n// Render the latest user and Gemini transcription on OLED #2.
+// OLED2 menampilkan RSSI Wi-Fi dan latensi TCP ke endpoint Gemini di baris atas.
+// Render the latest user and Gemini transcription on OLED #2.
 void oled2_face_set_user_text(const char *text);
 void oled2_face_set_gemini_text(const char *text);
 void oled2_face_set_status(const char *status);
