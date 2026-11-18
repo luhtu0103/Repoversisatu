@@ -232,7 +232,7 @@ static void thinking_sequence(void)
     // Every render follows the shared direction published by the servo controller.
     static const int moods[] = {10, 11, 12, 13, 14, 15};
 
-    // Slow, slightly varied holds: each mood stays readable for 5–8 seconds.
+    // Slow, slightly varied holds: each mood stays readable for 5-8 seconds.
     static const uint16_t min_hold_ms[] = {5000, 5400, 5200, 5000, 5600, 5300};
     static const uint16_t max_hold_ms[] = {7600, 8000, 7400, 7800, 8000, 7600};
 
