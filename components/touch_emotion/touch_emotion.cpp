@@ -1,6 +1,7 @@
 #include "touch_emotion.h"
 #include "display.h"
 #include "websocket_mgr.h"
+#include "radio_player.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -44,23 +45,32 @@ static void touch_task(void *arg)
             if (stable) {
                 pressed_since_us = now;
                 long_sent = false;
-                if (touch_window_start_us == 0 || now - touch_window_start_us > MULTI_TOUCH_WINDOW_US) {
-                    touch_window_start_us = now;
-                    touch_count = 0;
-                }
-                ++touch_count;
-                if (touch_count >= MULTI_TOUCH_COUNT) {
+                if (radio_is_active()) {
+                    // Radio sedang main: sentuhan apa pun menghentikannya (tanpa emosi).
+                    radio_stop();
+                    long_sent = true;
                     touch_count = 0;
                     touch_window_start_us = 0;
-                    long_sent = true;
-                    if (face_get_state() != FACE_SPEAKING) {
-                        emotion_previous = face_get_state();
-                        face_set_state(FACE_ANGRY);
-                        if (websocket_is_connected()) websocket_send_touch_prompt(true);
-                        emotion_until_us = now + (int64_t)EMOTION_MS * 1000LL;
-                        ESP_LOGI(TAG, "Sentuhan berulang: MARAH");
-                    } else {
-                        ESP_LOGI(TAG, "Tap berulang diabaikan: robot sedang berbicara");
+                    ESP_LOGI(TAG, "Sentuhan: hentikan radio");
+                } else {
+                    if (touch_window_start_us == 0 || now - touch_window_start_us > MULTI_TOUCH_WINDOW_US) {
+                        touch_window_start_us = now;
+                        touch_count = 0;
+                    }
+                    ++touch_count;
+                    if (touch_count >= MULTI_TOUCH_COUNT) {
+                        touch_count = 0;
+                        touch_window_start_us = 0;
+                        long_sent = true;
+                        if (face_get_state() != FACE_SPEAKING) {
+                            if (emotion_until_us == 0) emotion_previous = face_get_state();
+                            face_set_state(FACE_ANGRY);
+                            if (websocket_is_connected()) websocket_send_touch_prompt(true);
+                            emotion_until_us = now + (int64_t)EMOTION_MS * 1000LL;
+                            ESP_LOGI(TAG, "Sentuhan berulang: MARAH");
+                        } else {
+                            ESP_LOGI(TAG, "Tap berulang diabaikan: robot sedang berbicara");
+                        }
                     }
                 }
             } else {
@@ -68,12 +78,13 @@ static void touch_task(void *arg)
             }
         }
 
-        if (stable && !long_sent && pressed_since_us > 0 && now - pressed_since_us >= LONG_TOUCH_US) {
+        if (stable && !long_sent && pressed_since_us > 0 && now - pressed_since_us >= LONG_TOUCH_US &&
+            !radio_is_active()) {
             long_sent = true;
             touch_count = 0;
             touch_window_start_us = 0;
             if (face_get_state() != FACE_SPEAKING) {
-                emotion_previous = face_get_state();
+                if (emotion_until_us == 0) emotion_previous = face_get_state();
                 face_set_state(FACE_HAPPY);
                 if (websocket_is_connected()) websocket_send_touch_prompt(false);
                 emotion_until_us = now + (int64_t)EMOTION_MS * 1000LL;
