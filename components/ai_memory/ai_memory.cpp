@@ -41,12 +41,39 @@ static bool ensure_mounted(void)
                  (unsigned long)part->address);
 
         /*
-         * Never auto-format the shared storage partition on a mount error:
-         * it also contains speaker profiles and persistent AI memory. Keep
-         * the existing bytes intact and let the caller report storage failure.
+         * The partition is shared by voice profiles and AI memory. Only format
+         * when every byte is erased (0xFF), which identifies a fresh partition.
+         * Any non-empty/unreadable partition is preserved for recovery.
          */
-        ESP_LOGE(TAG, "Filesystem dipertahankan; tidak auto-format karena berisi profil suara dan memori AI.");
-        return false;
+        uint8_t probe[256];
+        bool blank = true;
+        for (size_t offset = 0; offset < part->size && blank; offset += sizeof(probe)) {
+            const size_t chunk = (part->size - offset < sizeof(probe))
+                ? (size_t)(part->size - offset) : sizeof(probe);
+            if (esp_partition_read(part, offset, probe, chunk) != ESP_OK) {
+                blank = false;
+                break;
+            }
+            for (size_t i = 0; i < chunk; ++i) {
+                if (probe[i] != 0xFF) { blank = false; break; }
+            }
+        }
+        if (!blank) {
+            ESP_LOGE(TAG, "Partisi storage tidak kosong/ tidak terbaca; data dipertahankan, format otomatis dibatalkan.");
+            return false;
+        }
+
+        ESP_LOGW(TAG, "Partisi storage benar-benar kosong; membuat filesystem SPIFFS baru.");
+        esp_err_t format_err = esp_spiffs_format(PARTITION_LABEL);
+        if (format_err != ESP_OK) {
+            ESP_LOGE(TAG, "Format SPIFFS gagal: %s", esp_err_to_name(format_err));
+            return false;
+        }
+        err = esp_vfs_spiffs_register(&conf);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Mount SPIFFS setelah format partisi kosong gagal: %s", esp_err_to_name(err));
+            return false;
+        }
     }
 
     s_initialized = true;
