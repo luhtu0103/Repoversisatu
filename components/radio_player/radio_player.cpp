@@ -443,10 +443,11 @@ static int raw_http_stream(char *url, size_t url_cap, bool *got_data)
         }
         free(buf); close(sock);
         if (!loc[0]) { ESP_LOGW(TAG, "Redirect tanpa Location"); return -1; }
-        char next[256];
+        char next[512];   // cukup besar untuk host + port + Location; panjang akhir dicek di bawah
         if (strncmp(loc, "http", 4) == 0) strlcpy(next, loc, sizeof(next));
         else if (loc[0] == '/') snprintf(next, sizeof(next), "http://%s:%d%s", host, port, loc);
         else { ESP_LOGW(TAG, "Location tidak dikenal: %s", loc); return -1; }
+        if (strlen(next) >= url_cap) { ESP_LOGW(TAG, "Alamat redirect terlalu panjang"); return -1; }
         ESP_LOGI(TAG, "Redirect -> %s", next);
         strlcpy(url, next, url_cap);
         return -2;
