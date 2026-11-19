@@ -27,3 +27,7 @@ bool websocket_send_speaker_context(const char *name);
 // Pembicara dikenali di tengah obrolan (dari kata harian). Gemini hanya diberi tahu
 // namanya, tanpa menyapa ulang.
 bool websocket_send_speaker_update(const char *name);
+
+// Radio streaming selesai (reason: 0 = dihentikan pengguna lewat sentuh, 1 = gangguan stream,
+// 2 = gagal dimulai). Gemini diberi tahu bahwa tadi baru selesai memutar radio, lalu menyapa singkat.
+bool websocket_send_radio_ended(const char *station, int reason);
