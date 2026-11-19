@@ -18,10 +18,15 @@
 #include "freertos/task.h"
 #include "freertos/stream_buffer.h"
 
+#include "lwip/sockets.h"
+#include "lwip/netdb.h"
+
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #define MINIMP3_IMPLEMENTATION
 #define MINIMP3_ONLY_MP3
@@ -333,12 +338,165 @@ static void release_user(void)
 
 /* ================= Unduh stream ================= */
 
+/* ---- Klien HTTP sederhana (socket) untuk alamat http://.
+ * Server radio Shoutcast sering menjawab "ICY 200 OK" yang ditolak esp_http_client. ---- */
+// 0 = berakhir setelah ada aliran, -1 = gagal, -2 = pindah alamat (url sudah diganti)
+static int raw_http_stream(char *url, size_t url_cap, bool *got_data)
+{
+    char host[96] = {};
+    char path[192] = "/";
+    int port = 80;
+    const char *p = url + 7;                       // lewati "http://"
+    size_t hl = 0;
+    while (*p && *p != ':' && *p != '/' && hl < sizeof(host) - 1) host[hl++] = *p++;
+    host[hl] = '\0';
+    if (*p == ':') { port = atoi(p + 1); while (*p && *p != '/') ++p; }
+    if (*p == '/') strlcpy(path, p, sizeof(path));
+    if (!host[0] || port <= 0 || port > 65535) { ESP_LOGW(TAG, "Alamat stream tidak valid: %s", url); return -1; }
+
+    struct addrinfo hints = {};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *res = nullptr;
+    char port_s[8];
+    snprintf(port_s, sizeof(port_s), "%d", port);
+    if (getaddrinfo(host, port_s, &hints, &res) != 0 || !res) {
+        ESP_LOGW(TAG, "DNS gagal: %s", host);
+        return -1;
+    }
+    int sock = socket(res->ai_family, res->ai_socktype, 0);
+    if (sock < 0) { freeaddrinfo(res); return -1; }
+    struct timeval tv = {};
+    tv.tv_sec = 5;
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    tv.tv_sec = 1;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    const int rc = connect(sock, res->ai_addr, res->ai_addrlen);
+    freeaddrinfo(res);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "Gagal tersambung ke %s:%d (errno=%d)", host, port, errno);
+        close(sock);
+        return -1;
+    }
+
+    char req[384];
+    const int rn = snprintf(req, sizeof(req),
+        "GET %s HTTP/1.0\r\nHost: %s:%d\r\nUser-Agent: Mozilla/5.0 (ESP32 Asisten Robot)\r\n"
+        "Accept: */*\r\nIcy-MetaData: 0\r\nConnection: close\r\n\r\n", path, host, port);
+    if (rn <= 0 || send(sock, req, (size_t)rn, 0) != rn) {
+        ESP_LOGW(TAG, "Gagal mengirim permintaan stream");
+        close(sock);
+        return -1;
+    }
+
+    uint8_t *buf = (uint8_t *)malloc(2048);
+    if (!buf) { close(sock); return -1; }
+    size_t have = 0;
+    int hdr_end = -1;
+    int idle = 0;
+    while (!s_stop && hdr_end < 0 && have < 2047) {
+        const int n = recv(sock, buf + have, 2047 - have, 0);
+        if (n > 0) {
+            have += (size_t)n;
+            buf[have] = '\0';
+            const char *e = strstr((const char *)buf, "\r\n\r\n");
+            if (e) hdr_end = (int)(e - (const char *)buf) + 4;
+        } else if (n == 0) {
+            break;
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (++idle > 6) break;
+        } else {
+            break;
+        }
+    }
+    if (hdr_end < 0) {
+        ESP_LOGW(TAG, "Server tidak mengirim header stream");
+        free(buf); close(sock);
+        return -1;
+    }
+
+    buf[have] = '\0';
+    int status = 0;
+    {
+        const char *sp = strchr((const char *)buf, ' ');
+        if (sp) status = atoi(sp + 1);
+    }
+    char first[80] = {};
+    {
+        size_t i = 0;
+        while (i < sizeof(first) - 1 && buf[i] && buf[i] != '\r' && buf[i] != '\n') { first[i] = (char)buf[i]; ++i; }
+    }
+    ESP_LOGI(TAG, "Server: \"%s\" (kode %d)", first, status);
+
+    if (status >= 300 && status < 400) {
+        char loc[240] = {};
+        for (const char *ln = (const char *)buf; ln && *ln; ln = strstr(ln, "\r\n")) {
+            while (*ln == '\r' || *ln == '\n') ++ln;
+            if (strncasecmp(ln, "Location:", 9) == 0) {
+                const char *v = ln + 9;
+                while (*v == ' ') ++v;
+                size_t i = 0;
+                while (v[i] && v[i] != '\r' && v[i] != '\n' && i < sizeof(loc) - 1) { loc[i] = v[i]; ++i; }
+                loc[i] = '\0';
+                break;
+            }
+        }
+        free(buf); close(sock);
+        if (!loc[0]) { ESP_LOGW(TAG, "Redirect tanpa Location"); return -1; }
+        char next[256];
+        if (strncmp(loc, "http", 4) == 0) strlcpy(next, loc, sizeof(next));
+        else if (loc[0] == '/') snprintf(next, sizeof(next), "http://%s:%d%s", host, port, loc);
+        else { ESP_LOGW(TAG, "Location tidak dikenal: %s", loc); return -1; }
+        ESP_LOGI(TAG, "Redirect -> %s", next);
+        strlcpy(url, next, url_cap);
+        return -2;
+    }
+    if (status != 200) {
+        free(buf); close(sock);
+        return -1;
+    }
+
+    ESP_LOGI(TAG, "Stream tersambung");
+    // Sisa data setelah header adalah awal audio.
+    if (have > (size_t)hdr_end) {
+        size_t off = (size_t)hdr_end;
+        *got_data = true;
+        while (off < have && !s_stop)
+            off += xStreamBufferSend(s_sb, buf + off, have - off, pdMS_TO_TICKS(300));
+    }
+    idle = 0;
+    while (!s_stop) {
+        const int n = recv(sock, buf, 2048, 0);
+        if (n > 0) {
+            idle = 0;
+            *got_data = true;
+            int off = 0;
+            while (off < n && !s_stop)
+                off += (int)xStreamBufferSend(s_sb, buf + off, (size_t)(n - off), pdMS_TO_TICKS(300));
+        } else if (n == 0) {
+            break;                                   // server menutup
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (++idle > 8) break;                   // 8 detik tanpa data
+        } else {
+            break;
+        }
+    }
+    free(buf);
+    close(sock);
+    return 0;
+}
+
 // 0 = berakhir normal/putus setelah ada data, -1 = gagal tersambung
 static int stream_once(const char *start_url, bool *got_data)
 {
     char url[256];
     strlcpy(url, start_url, sizeof(url));
     for (int hop = 0; hop < 6 && !s_stop; ++hop) {
+        if (strncmp(url, "http://", 7) == 0) {
+            const int rr = raw_http_stream(url, sizeof(url), got_data);
+            if (rr == -2) continue;                 // pindah alamat
+            return rr;
+        }
         esp_http_client_config_t cfg = {};
         cfg.url = url;
         cfg.method = HTTP_METHOD_GET;
@@ -359,7 +517,8 @@ static int stream_once(const char *start_url, bool *got_data)
             esp_http_client_cleanup(h);
             return -1;
         }
-        (void)esp_http_client_fetch_headers(h);
+        const int64_t hdr_len = esp_http_client_fetch_headers(h);
+        if (hdr_len < 0) ESP_LOGW(TAG, "Header stream bermasalah (%lld)", (long long)hdr_len);
         const int status = esp_http_client_get_status_code(h);
         if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
             char *loc = nullptr;
@@ -371,6 +530,7 @@ static int stream_once(const char *start_url, bool *got_data)
                 esp_http_client_cleanup(h);
                 continue;
             }
+            ESP_LOGW(TAG, "Redirect (kode %d) tanpa alamat yang bisa dipakai", status);
             esp_http_client_close(h);
             esp_http_client_cleanup(h);
             return -1;
