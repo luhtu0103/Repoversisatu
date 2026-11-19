@@ -130,7 +130,7 @@ static void add_device_control_tool(cJSON *setup)
     /* Gemini 3.8 Live defaults to async tool calls; preserve the existing synchronous device-control flow. */
     cJSON_AddStringToObject(decl, "behavior", "BLOCKING");
     cJSON_AddStringToObject(decl, "description",
-        "Mengontrol perangkat rumah melalui UART dan kepala robot. Untuk gerakan kepala gunakan servo_kiri, servo_kanan, servo_anguk, servo_geleng, atau servo_stop. Gunakan hanya jika pengguna meminta aksi perangkat. Setelah aksi berhasil, jawab natural dalam bahasa Indonesia.");
+        "Mengontrol perangkat rumah melalui UART dan kepala robot. Untuk gerakan kepala gunakan servo_kiri, servo_kanan, servo_anguk, servo_geleng, atau servo_stop. Perintah mp3_* hanya untuk pemutar MP3 fisik terpisah, bukan radio streaming (untuk radio gunakan putar_radio). Gunakan hanya jika pengguna meminta aksi perangkat. Setelah aksi berhasil, jawab natural dalam bahasa Indonesia.");
 
     cJSON *parameters = cJSON_AddObjectToObject(decl, "parameters");
     cJSON_AddStringToObject(parameters, "type", "OBJECT");
@@ -282,6 +282,35 @@ static void add_alarm_tool(cJSON *setup)
     cJSON_AddItemToArray(decls, decl);
 }
 
+static void add_radio_tool(cJSON *setup)
+{
+    if (!setup) return;
+    cJSON *tools = cJSON_GetObjectItem(setup, "tools");
+    if (!cJSON_IsArray(tools)) return;
+    cJSON *tool = NULL, *decls = NULL;
+    cJSON_ArrayForEach(tool, tools) {
+        decls = cJSON_GetObjectItem(tool, "functionDeclarations");
+        if (cJSON_IsArray(decls)) break;
+        decls = NULL;
+    }
+    if (!decls) return;
+    cJSON *decl = cJSON_CreateObject();
+    if (!decl) return;
+    cJSON_AddStringToObject(decl, "name", "putar_radio");
+    cJSON_AddStringToObject(decl, "behavior", "BLOCKING");
+    cJSON_AddStringToObject(decl, "description",
+        "Memutar radio streaming internet lewat speaker robot. Panggil HANYA saat pengguna meminta memutar radio atau musik dari radio, misalnya 'putar radio Genta', 'putar Menara FM', atau 'putar radio Bali'. Ini BUKAN pemutar MP3 fisik (itu control_device mp3_*). Isi query dengan nama stasiun yang diucapkan pengguna; jika pengguna hanya bilang 'putar radio' atau 'radio Bali', isi 'Bali'. Setelah tool menjawab, ucapkan SATU kalimat singkat bahwa radio akan diputar dan pengguna dapat menyentuh sensor sentuh untuk menghentikannya, lalu berhenti bicara. Radio menyala otomatis setelah kamu selesai bicara dan percakapan dijeda sampai pengguna menyentuh sensor. Jika tool gagal, jangan mengaku berhasil.");
+    cJSON *params = cJSON_AddObjectToObject(decl, "parameters");
+    cJSON_AddStringToObject(params, "type", "OBJECT");
+    cJSON *props = cJSON_AddObjectToObject(params, "properties");
+    cJSON *query = cJSON_AddObjectToObject(props, "query");
+    cJSON_AddStringToObject(query, "type", "STRING");
+    cJSON_AddStringToObject(query, "description", "Nama stasiun radio, mis. 'Genta FM', 'Menara FM', 'Beat Radio', atau 'Bali' untuk radio Bali populer.");
+    cJSON *required = cJSON_AddArrayToObject(params, "required");
+    cJSON_AddItemToArray(required, cJSON_CreateString("query"));
+    cJSON_AddItemToArray(decls, decl);
+}
+
 bool build_gemini_setup(char **output, size_t *output_len)
 {
     if (!output || !output_len) return false;
@@ -358,6 +387,7 @@ bool build_gemini_setup(char **output, size_t *output_len)
     add_memory_tools(setup);
     add_web_search_tool(setup);
     add_alarm_tool(setup);
+    add_radio_tool(setup);
 
     cJSON *realtime = cJSON_AddObjectToObject(setup, "realtimeInputConfig");
     cJSON *aad = cJSON_AddObjectToObject(realtime, "automaticActivityDetection");
@@ -610,6 +640,17 @@ static void process_gemini_tool_call(cJSON *tool_call)
                     (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
                         "Pencarian web belum bisa dimulai karena memori atau task tidak tersedia. Coba lagi.");
                 }
+            }
+            continue;
+        } else if (strcmp(name->valuestring, "putar_radio") == 0) {
+            cJSON *query = cJSON_GetObjectItem(args, "query");
+            const char *qs = (cJSON_IsString(query) && query->valuestring) ? query->valuestring : "";
+            /* Tahan mic selagi mencari stasiun; dibuka lagi setelah balasan Gemini selesai. */
+            websocket_set_mic_uplink_paused(true);
+            if (!websocket_radio_start(id->valuestring, qs)) {
+                websocket_set_mic_uplink_paused(false);
+                (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
+                    "Radio belum bisa dimulai karena memori atau task tidak tersedia. Coba lagi.");
             }
             continue;
         } else if (strcmp(name->valuestring, "alarm_control") == 0) {
