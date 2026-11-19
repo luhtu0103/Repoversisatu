@@ -12,6 +12,7 @@
 #include "led_rgb.h"
 #include "speaker_id.h"
 #include "alarm.h"
+#include "radio_player.h"
 
 #include "esp_log.h"
 #include "esp_system.h"
@@ -215,6 +216,11 @@ static volatile bool mic_voice_detected = false;
 static int64_t disconnect_wait_start_us = 0;
 static bool alarm_prompt_pending = false;
 static alarm_info_t alarm_prompt_info = {};
+
+/* Setelah radio streaming selesai, Gemini diberi tahu bahwa tadi baru memutar radio. */
+static char radio_note_name[48] = {};
+static int radio_note_reason = 0;
+static bool radio_note_pending = false;
 
 /* Ring 1,5 detik audio mentah untuk Speaker ID. MFCC+DTW harus berjalan
  * di worker terpisah agar audio_task tetap menguras antrean mikrofon. */
@@ -524,6 +530,7 @@ static void audio_task(void *arg)
         if (alarm_poll_due_internal()) {
             alarm_info_t fired = {};
             if (alarm_take_due(&fired)) {
+                if (radio_is_active()) radio_stop();   // alarm lebih penting daripada radio
                 alarm_prompt_info = fired;
                 alarm_prompt_pending = true;
                 ESP_LOGW(TAG, "ALARM: waktu %02d:%02d WITA tiba; memulai Gemini otomatis. Keterangan=%s",
@@ -566,6 +573,55 @@ static void audio_task(void *arg)
             face_set_state(FACE_SLEEP);
             display_status("Menunggu wakeword");
             continue;
+        }
+        // ---- Radio streaming ----
+        // 1) Gemini sudah menjawab tool putar_radio dan selesai mengucapkan konfirmasi:
+        //    akhiri sesi Gemini lalu mulai radio.
+        if (radio_has_pending() && !radio_is_active()) {
+            const int64_t age_us = radio_pending_age_us();
+            const bool spoke_done = age_us > 1200000LL && websocket_take_audio_playback_complete();
+            const bool no_speech = age_us > 6000000LL && !audio_turn_active && !audio_turn_complete_pending;
+            if (spoke_done || no_speech || age_us > 20000000LL) {
+                ESP_LOGI(TAG, "RADIO: konfirmasi Gemini selesai; sesi dihentikan, radio dimulai");
+                websocket_request_fresh_session_reset();
+                websocket_disconnect();
+                assistant_active = false;
+                buffer_pos = 0;
+                for (int i = 0; i < 60 && websocket_lifecycle_busy(); ++i) vTaskDelay(pdMS_TO_TICKS(50));
+                websocket_set_mic_uplink_paused(false);
+                audio_hal_set_mic_enabled(false);
+                if (!radio_start_pending()) ESP_LOGW(TAG, "RADIO: gagal dimulai; kembali ke obrolan");
+                continue;
+            }
+        }
+        // 2) Radio sedang main: mic mati, wake word dan Gemini tidak aktif. Sentuh sensor = berhenti.
+        if (radio_is_active()) {
+            audio_hal_set_mic_enabled(false);   // websocket bisa menyalakannya lagi saat membersihkan sesi
+            buffer_pos = 0;
+            mic_voice_detected = false;
+            tx_backpressure_start_us = 0;
+            consecutive_tx_enqueue_failures = 0;
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        // 3) Radio selesai: kembali ke obrolan dan beri tahu Gemini.
+        if (radio_has_ended()) {
+            char radio_name[48] = {};
+            int radio_reason = 0;
+            if (assistant_active || alarm_prompt_pending) {
+                (void)radio_take_ended(radio_name, sizeof(radio_name), &radio_reason);   // sesi lain sudah jalan
+            } else if (!websocket_lifecycle_busy() && radio_take_ended(radio_name, sizeof(radio_name), &radio_reason)) {
+                audio_hal_set_mic_enabled(true);
+                strlcpy(radio_note_name, radio_name, sizeof(radio_note_name));
+                radio_note_reason = radio_reason;
+                radio_note_pending = true;
+                assistant_active = true;
+                disconnect_wait_start_us = 0;
+                face_set_state(FACE_THINKING);
+                ESP_LOGI(TAG, "RADIO selesai (alasan=%d); memulai sesi Gemini baru", radio_reason);
+                websocket_app_start();
+                continue;
+            }
         }
         // During web search/TX congestion, keep draining the capture queue.
         // The I2S capture task stays active; not reading here fills its queue and
@@ -641,6 +697,7 @@ static void audio_task(void *arg)
 
         if (!assistant_active) {
             portENTER_CRITICAL(&speaker_context_mux);
+            radio_note_pending = false;
             speaker_context_pending = false;  // sesi lama selesai; jangan bawa nama ke sesi berikutnya
             speaker_session_seq = speaker_session_seq + 1; // hasil worker yang terlambat jadi basi
             speaker_change_pending = false;
@@ -793,6 +850,8 @@ static void audio_task(void *arg)
                 portEXIT_CRITICAL(&speaker_context_mux);
             }
         }
+        if (radio_note_pending && websocket_send_radio_ended(radio_note_name, radio_note_reason))
+            radio_note_pending = false;
         if (alarm_prompt_pending && websocket_is_connected()) {
             if (websocket_send_alarm_prompt(alarm_prompt_info.hour, alarm_prompt_info.minute,
                                             alarm_prompt_info.label)) {
