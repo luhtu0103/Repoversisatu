@@ -394,7 +394,7 @@ bool build_gemini_setup(char **output, size_t *output_len)
     cJSON_AddBoolToObject(aad, "disabled", false);
     /* LOW: suara pelan/gumaman/sisa gema tidak dianggap ucapan baru, jadi tidak
      * muncul kata sendirian ("Iya", "itu"). prefixPadding 300 ms menjaga awal kata. */
-    cJSON_AddStringToObject(aad, "startOfSpeechSensitivity", "START_SENSITIVITY_LOW");
+    cJSON_AddStringToObject(aad, "startOfSpeechSensitivity", "START_SENSITIVITY_HIGH");
     cJSON_AddNumberToObject(aad, "prefixPaddingMs", 300);
     cJSON_AddStringToObject(aad, "endOfSpeechSensitivity", "END_SENSITIVITY_LOW");
     cJSON_AddNumberToObject(aad, "silenceDurationMs", 700);
