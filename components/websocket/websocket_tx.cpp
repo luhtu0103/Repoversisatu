@@ -2,6 +2,7 @@
 #include "web_config.h"
 #include "esp_log.h"
 #include <string.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -246,5 +247,48 @@ bool websocket_send_speaker_update(const char *name)
         return false;
     }
     ESP_LOGI(TAG, "Pembaruan pembicara masuk antrean TX: %s", safe);
+    return true;
+}
+
+bool websocket_send_radio_ended(const char *station, int reason)
+{
+    if (!websocket_is_connected() || !websocket_tx_queue) return false;
+
+    char safe[64];
+    size_t j = 0;
+    for (const unsigned char *p = (const unsigned char *)(station ? station : ""); *p && j + 1 < sizeof(safe); ++p) {
+        if (*p >= 0x20 && *p < 0x7F && *p != '"' && *p != '\\') safe[j++] = (char)*p;
+    }
+    safe[j] = '\0';
+    if (j == 0) snprintf(safe, sizeof(safe), "radio");
+
+    const char *what =
+        (reason == 1) ? "berhenti sendiri karena gangguan jaringan atau stream. Sampaikan hal itu dengan singkat dan tawarkan memutarnya lagi atau stasiun lain."
+      : (reason == 2) ? "gagal dimulai. Minta maaf singkat dan tawarkan stasiun lain."
+      :                 "baru saja dimatikan pengguna dengan menyentuh sensor. Katakan singkat bahwa radionya sudah dimatikan, lalu tanyakan apa yang bisa dibantu.";
+
+    char json[640];
+    int n = snprintf(json, sizeof(json),
+        "{\"clientContent\":{\"turns\":[{\"role\":\"user\",\"parts\":[{\"text\":"
+        "\"[Sistem] Tadi perangkat memutar radio streaming %s dan radionya %s "
+        "Jawab dalam bahasa Indonesia, cukup satu atau dua kalimat.\"}]}],\"turnComplete\":true}}",
+        safe, what);
+    if (n <= 0 || (size_t)n >= sizeof(json)) return false;
+
+    uint8_t *copy = (uint8_t *)malloc((size_t)n);
+    if (!copy) return false;
+    memcpy(copy, json, (size_t)n);
+    ws_tx_command_t cmd = {};
+    cmd.type = WS_TX_COMMAND_TEXT;
+    cmd.generation = websocket_connection_generation;
+    cmd.len = (uint16_t)n;
+    cmd.data = copy;
+    if (xQueueSend(websocket_tx_queue, &cmd, 0) != pdTRUE) {
+        websocket_set_backpressured(true);
+        free(copy);
+        ESP_LOGW(TAG, "Catatan radio ditahan: TX queue penuh");
+        return false;
+    }
+    ESP_LOGI(TAG, "Catatan radio selesai masuk antrean TX: %s (alasan=%d)", safe, reason);
     return true;
 }
