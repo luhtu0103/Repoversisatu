@@ -41,7 +41,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 
-constexpr uint32_t AUDIO_VOICE_ENERGY_THRESHOLD_SQ = 1440000;  // 1200^2
+constexpr uint32_t AUDIO_VOICE_ENERGY_THRESHOLD_SQ = 360000;  // 600^2; lower gate for quiet speech
 constexpr time_t NTP_FALLBACK_TIMESTAMP = 1770000000;  // 2026-02-02 UTC
 
 static const char *TAG = "MAIN";
