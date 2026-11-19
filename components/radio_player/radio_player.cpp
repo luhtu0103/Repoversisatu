@@ -47,6 +47,8 @@ static const char *TAG = "RADIO";
 // Berhenti jika tidak ada data baru selama ini.
 #define RADIO_UNDERRUN_TIMEOUT_MS 10000
 #define RADIO_CONNECT_ATTEMPTS 4
+// Stack task pemutar (byte). Decoder MP3 sendiri butuh ~17 KB; sisanya untuk suara/wajah/log.
+#define RADIO_PLAY_STACK 28672
 
 /* Stasiun siap pakai yang alamatnya sudah diperiksa (MP3 128 kbps, HTTPS). */
 struct preset_t { const char *alias; const char *name; const char *url; };
@@ -381,7 +383,7 @@ static int raw_http_stream(char *url, size_t url_cap, bool *got_data)
 
     char req[384];
     const int rn = snprintf(req, sizeof(req),
-        "GET %s HTTP/1.0\r\nHost: %s:%d\r\nUser-Agent: Mozilla/5.0 (ESP32 Asisten Robot)\r\n"
+        "GET %s HTTP/1.0\r\nHost: %s:%d\r\nUser-Agent: WinampMPEG/5.09\r\n"
         "Accept: */*\r\nIcy-MetaData: 0\r\nConnection: close\r\n\r\n", path, host, port);
     if (rn <= 0 || send(sock, req, (size_t)rn, 0) != rn) {
         ESP_LOGW(TAG, "Gagal mengirim permintaan stream");
@@ -443,10 +445,19 @@ static int raw_http_stream(char *url, size_t url_cap, bool *got_data)
         }
         free(buf); close(sock);
         if (!loc[0]) { ESP_LOGW(TAG, "Redirect tanpa Location"); return -1; }
-        char next[512];   // cukup besar untuk host + port + Location; panjang akhir dicek di bawah
+        char next[640];   // cukup besar untuk host + port + Location; panjang akhir dicek di bawah
         if (strncmp(loc, "http", 4) == 0) strlcpy(next, loc, sizeof(next));
         else if (loc[0] == '/') snprintf(next, sizeof(next), "http://%s:%d%s", host, port, loc);
-        else { ESP_LOGW(TAG, "Location tidak dikenal: %s", loc); return -1; }
+        else {
+            // Alamat relatif tanpa garis miring (mis. "index.html?sid=1"): tempelkan ke folder alamat sekarang.
+            char dir[192];
+            strlcpy(dir, path, sizeof(dir));
+            char *q = strchr(dir, '?');
+            if (q) *q = '\0';
+            char *sl = strrchr(dir, '/');
+            if (sl) sl[1] = '\0'; else strlcpy(dir, "/", sizeof(dir));
+            snprintf(next, sizeof(next), "http://%s:%d%s%s", host, port, dir, loc);
+        }
         if (strlen(next) >= url_cap) { ESP_LOGW(TAG, "Alamat redirect terlalu panjang"); return -1; }
         ESP_LOGI(TAG, "Redirect -> %s", next);
         strlcpy(url, next, url_cap);
@@ -589,6 +600,7 @@ static void net_task(void *)
         for (int i = 0; i < 10 && !s_stop; ++i) vTaskDelay(pdMS_TO_TICKS(100));
     }
     if (!s_stop && s_net_fail == 0) s_net_fail = 1;
+    ESP_LOGI(TAG, "Unduh selesai; sisa stack unduh=%u byte", (unsigned)uxTaskGetStackHighWaterMark(nullptr));
     s_net_done = true;
     s_net_alive = false;
     release_user();
@@ -744,7 +756,8 @@ finish:
     }
     s_active = false;
     release_user();
-    ESP_LOGI(TAG, "Radio selesai (alasan=%d)", end_reason);
+    ESP_LOGI(TAG, "Radio selesai (alasan=%d); sisa stack pemutar=%u byte", end_reason,
+             (unsigned)uxTaskGetStackHighWaterMark(nullptr));
     vTaskDelete(nullptr);
 }
 
@@ -780,7 +793,7 @@ bool radio_start_pending(void)
     s_active = true;
     s_net_alive = true;
 
-    if (xTaskCreatePinnedToCore(net_task, "radio_net", 8192, nullptr, 4, nullptr, 0) != pdPASS) {
+    if (xTaskCreatePinnedToCore(net_task, "radio_net", 10240, nullptr, 4, nullptr, 0) != pdPASS) {
         ESP_LOGE(TAG, "Gagal membuat radio_net");
         s_active = false;
         s_net_alive = false;
@@ -790,7 +803,9 @@ bool radio_start_pending(void)
         mark_ended(s_cur.name, 2);
         return false;
     }
-    if (xTaskCreatePinnedToCore(play_task, "radio_play", 16384, nullptr, 3, nullptr, 1) != pdPASS) {
+    // Catatan: minimp3 butuh ~17 KB stack per frame (mp3dec_decode_frame = 17232 byte).
+    // Stack 16 KB sebelumnya meluap dan merusak memori (crash StoreProhibited).
+    if (xTaskCreatePinnedToCore(play_task, "radio_play", RADIO_PLAY_STACK, nullptr, 3, nullptr, 1) != pdPASS) {
         ESP_LOGE(TAG, "Gagal membuat radio_play");
         s_stop = true;                 // hentikan net_task; ia akan melepas buffer
         s_active = false;
