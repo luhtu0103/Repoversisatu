@@ -8,6 +8,7 @@ idf_component_register(
         "websocket_tx.cpp"
         "websocket_tool.cpp"
         "websocket_search.cpp"
+        "websocket_radio.cpp"
         "websocket_stack_wrap.c"
 
     INCLUDE_DIRS
@@ -28,6 +29,7 @@ idf_component_register(
         ai_memory
         servo_head
         alarm
+        radio_player
 )
 
 target_link_libraries(${COMPONENT_LIB} INTERFACE
