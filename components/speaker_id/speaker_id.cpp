@@ -90,6 +90,7 @@ static template_t *s_pend = nullptr;
 static char        s_pend_name[SPEAKER_ID_NAME_MAX + 1] = {0};
 static int         s_pend_count = 0;
 static SemaphoreHandle_t s_mutex = nullptr;
+static SemaphoreHandle_t s_mic_mutex = nullptr;
 static bool        s_ready = false;
 
 const char *speaker_id_status_text(speaker_id_status_t status)
@@ -366,6 +367,56 @@ static int find_profile(const char *name)
 }
 
 /* ---------- File ---------- */
+static const char *FILE_BACKUP = "/spiffs/voiceid.bak";
+static const char *VP_FILE_BACKUP = "/spiffs/voiceprint.bak";
+
+/* Recover an interrupted replacement before reading or writing profiles. */
+static bool recover_profile_file(const char *path, const char *backup)
+{
+    FILE *main_file = fopen(path, "rb");
+    const bool main_exists = main_file != nullptr;
+    if (main_file) fclose(main_file);
+    FILE *backup_file = fopen(backup, "rb");
+    const bool backup_exists = backup_file != nullptr;
+    if (backup_file) fclose(backup_file);
+
+    if (!main_exists && backup_exists) {
+        if (rename(backup, path) != 0) {
+            ESP_LOGE(TAG, "Tidak bisa memulihkan file profil dari backup %s", backup);
+            return false;
+        }
+        return true;
+    }
+    if (main_exists && backup_exists && remove(backup) != 0)
+        ESP_LOGW(TAG, "Backup lama belum bisa dihapus: %s", backup);
+    return true;
+}
+
+/* Keep the old profile file until the fully-written replacement is promoted. */
+static bool replace_profile_file(const char *tmp, const char *path, const char *backup)
+{
+    if (!recover_profile_file(path, backup)) return false;
+    FILE *old = fopen(path, "rb");
+    const bool had_old = old != nullptr;
+    if (old) fclose(old);
+
+    if (had_old && rename(path, backup) != 0) {
+        ESP_LOGE(TAG, "Tidak bisa mengamankan file lama %s", path);
+        remove(tmp);
+        return false;
+    }
+    if (rename(tmp, path) != 0) {
+        ESP_LOGE(TAG, "Promosi file profil gagal: %s", path);
+        if (had_old && rename(backup, path) != 0)
+            ESP_LOGE(TAG, "Pemulihan file profil gagal: %s", path);
+        remove(tmp);
+        return false;
+    }
+    if (had_old && remove(backup) != 0)
+        ESP_LOGW(TAG, "File baru tersimpan, tetapi backup belum terhapus: %s", backup);
+    return true;
+}
+
 static bool save_file(void)
 {
     FILE *f = fopen(FILE_TMP, "wb");
@@ -381,14 +432,16 @@ static bool save_file(void)
     if (fflush(f) != 0) ok = false;
     if (fclose(f) != 0) ok = false;
     if (!ok) { remove(FILE_TMP); ESP_LOGE(TAG, "Tulis file profil gagal"); return false; }
-    remove(FILE_PATH);                       /* SPIFFS tidak menimpa lewat rename */
-    if (rename(FILE_TMP, FILE_PATH) != 0) { ESP_LOGE(TAG, "Rename file profil gagal"); return false; }
-    return true;
+    return replace_profile_file(FILE_TMP, FILE_PATH, FILE_BACKUP);
 }
 
 static void load_file(void)
 {
     s_count = 0;
+    if (!recover_profile_file(FILE_PATH, FILE_BACKUP)) {
+        ESP_LOGE(TAG, "Profil suara tidak dapat dipulihkan; file tidak akan ditimpa");
+        return;
+    }
     FILE *f = fopen(FILE_PATH, "rb");
     if (!f) { ESP_LOGI(TAG, "Belum ada file profil suara"); return; }
     file_header_t h = {};
@@ -590,14 +643,16 @@ static bool vsave_file(void)
     if (fflush(f) != 0) ok = false;
     if (fclose(f) != 0) ok = false;
     if (!ok) { remove(VP_FILE_TMP); ESP_LOGE(TAG, "Tulis file warna suara gagal"); return false; }
-    remove(VP_FILE_PATH);
-    if (rename(VP_FILE_TMP, VP_FILE_PATH) != 0) { ESP_LOGE(TAG, "Rename file warna suara gagal"); return false; }
-    return true;
+    return replace_profile_file(VP_FILE_TMP, VP_FILE_PATH, VP_FILE_BACKUP);
 }
 
 static void vload_file(void)
 {
     s_vcount = 0;
+    if (!recover_profile_file(VP_FILE_PATH, VP_FILE_BACKUP)) {
+        ESP_LOGE(TAG, "Profil warna suara tidak dapat dipulihkan; file tidak akan ditimpa");
+        return;
+    }
     FILE *f = fopen(VP_FILE_PATH, "rb");
     if (!f) { ESP_LOGI(TAG, "Belum ada file warna suara"); return; }
     file_header_t h = {};
@@ -646,8 +701,10 @@ bool speaker_vp_set_tolerance(float tolerance)
 {
     if (!s_ready || !s_vready || tolerance < 1.0f || tolerance > 3.0f) return false;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+    const float old_tol = s_vtol;
     s_vtol = tolerance;
     const bool ok = vsave_file();
+    if (!ok) s_vtol = old_tol;
     xSemaphoreGive(s_mutex);
     return ok;
 }
@@ -762,9 +819,22 @@ bool speaker_vp_delete(const char *name)
     bool ok = false;
     const int idx = find_vprofile(name);
     if (idx >= 0) {
-        for (int i = idx; i + 1 < s_vcount; ++i) memcpy(&s_vprofiles[i], &s_vprofiles[i + 1], sizeof(vprofile_t));
-        --s_vcount;
-        ok = vsave_file();
+        vprofile_t *backup = (vprofile_t *)malloc(sizeof(vprofile_t));
+        if (backup) {
+            memcpy(backup, &s_vprofiles[idx], sizeof(vprofile_t));
+            const int old_count = s_vcount;
+            for (int i = idx; i + 1 < s_vcount; ++i) memcpy(&s_vprofiles[i], &s_vprofiles[i + 1], sizeof(vprofile_t));
+            --s_vcount;
+            ok = vsave_file();
+            if (!ok) {
+                for (int i = s_vcount; i > idx; --i) memcpy(&s_vprofiles[i], &s_vprofiles[i - 1], sizeof(vprofile_t));
+                memcpy(&s_vprofiles[idx], backup, sizeof(vprofile_t));
+                s_vcount = old_count;
+            }
+            free(backup);
+        } else {
+            ESP_LOGE(TAG, "Heap tidak cukup untuk backup profil sebelum hapus");
+        }
     }
     xSemaphoreGive(s_mutex);
     return ok;
@@ -774,6 +844,7 @@ size_t speaker_id_record_conv(int16_t *dest, size_t max_samples, uint32_t timeou
 {
     if (!dest || max_samples == 0) return 0;
     audio_hal_afe_init();                       /* aman dipanggil berulang */
+    speaker_id_mic_read_lock();
     const bool was_enabled = audio_hal_is_mic_enabled();
     audio_hal_set_mic_enabled(true);
 
@@ -807,6 +878,7 @@ size_t speaker_id_record_conv(int16_t *dest, size_t max_samples, uint32_t timeou
         got += n;
     }
     if (!was_enabled) audio_hal_set_mic_enabled(false);
+    speaker_id_mic_read_unlock();
     return got;
 }
 
@@ -833,7 +905,15 @@ bool speaker_id_init(void)
         return false;
     }
     s_mutex = xSemaphoreCreateMutex();
-    if (!s_mutex) return false;
+    s_mic_mutex = xSemaphoreCreateMutex();
+    if (!s_mutex || !s_mic_mutex) {
+        if (s_mutex) { vSemaphoreDelete(s_mutex); s_mutex = nullptr; }
+        if (s_mic_mutex) { vSemaphoreDelete(s_mic_mutex); s_mic_mutex = nullptr; }
+        heap_caps_free(s_profiles); s_profiles = nullptr;
+        heap_caps_free(s_pend); s_pend = nullptr;
+        heap_caps_free(s_work); s_work = nullptr;
+        return false;
+    }
     init_tables();
     load_file();
     s_ready = true;                  /* vp_init memakai s_ready/s_mutex */
@@ -843,6 +923,16 @@ bool speaker_id_init(void)
 }
 
 bool speaker_id_is_ready(void) { return s_ready; }
+
+void speaker_id_mic_read_lock(void)
+{
+    if (s_mic_mutex) xSemaphoreTake(s_mic_mutex, portMAX_DELAY);
+}
+
+void speaker_id_mic_read_unlock(void)
+{
+    if (s_mic_mutex) xSemaphoreGive(s_mic_mutex);
+}
 int  speaker_id_profile_count(void) { return s_ready ? s_count : 0; }
 bool speaker_id_has_profiles(void) { return s_ready && s_count > 0; }
 
@@ -862,8 +952,10 @@ bool speaker_id_set_tolerance(float tolerance)
 {
     if (!s_ready || tolerance < 1.0f || tolerance > 3.0f) return false;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+    const float old_tol = s_tol;
     s_tol = tolerance;
     bool ok = save_file();
+    if (!ok) s_tol = old_tol;
     xSemaphoreGive(s_mutex);
     return ok;
 }
@@ -992,6 +1084,13 @@ speaker_id_status_t speaker_id_enroll_sample(const char *name, int step,
     int idx = find_profile(clean);
     const bool is_new = idx < 0;
     if (is_new) idx = s_count;
+    profile_t *backup = (profile_t *)heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!backup) {
+        xSemaphoreGive(s_mutex);
+        return SPEAKER_ID_ERR_NOMEM;
+    }
+    const bool had_old_profile = !is_new;
+    if (had_old_profile) memcpy(backup, &s_profiles[idx], sizeof(profile_t));
     profile_t *prof = &s_profiles[idx];
     memset(prof, 0, sizeof(*prof));
     strlcpy(prof->name, clean, sizeof(prof->name));
@@ -1003,7 +1102,11 @@ speaker_id_status_t speaker_id_enroll_sample(const char *name, int step,
     if (is_new) ++s_count;
 
     const bool saved = save_file();
-    if (!saved && is_new) --s_count;
+    if (!saved) {
+        if (is_new) --s_count;
+        else memcpy(&s_profiles[idx], backup, sizeof(profile_t));
+    }
+    heap_caps_free(backup);
     s_pend_name[0] = '\0';
     s_pend_count = 0;
     if (done_out) *done_out = saved;
@@ -1019,9 +1122,22 @@ bool speaker_id_delete(const char *name)
     int idx = find_profile(name);
     bool ok = false;
     if (idx >= 0) {
-        for (int i = idx; i + 1 < s_count; ++i) memcpy(&s_profiles[i], &s_profiles[i + 1], sizeof(profile_t));
-        --s_count;
-        ok = save_file();
+        profile_t *backup = (profile_t *)heap_caps_malloc(sizeof(profile_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (backup) {
+            memcpy(backup, &s_profiles[idx], sizeof(profile_t));
+            const int old_count = s_count;
+            for (int i = idx; i + 1 < s_count; ++i) memcpy(&s_profiles[i], &s_profiles[i + 1], sizeof(profile_t));
+            --s_count;
+            ok = save_file();
+            if (!ok) {
+                for (int i = s_count; i > idx; --i) memcpy(&s_profiles[i], &s_profiles[i - 1], sizeof(profile_t));
+                memcpy(&s_profiles[idx], backup, sizeof(profile_t));
+                s_count = old_count;
+            }
+            heap_caps_free(backup);
+        } else {
+            ESP_LOGE(TAG, "PSRAM tidak cukup untuk backup profil sebelum hapus");
+        }
         ESP_LOGI(TAG, "Profil '%s' dihapus (%s)", name, ok ? "OK" : "file gagal ditulis");
     }
     xSemaphoreGive(s_mutex);
@@ -1031,6 +1147,7 @@ bool speaker_id_delete(const char *name)
 size_t speaker_id_record(int16_t *dest, size_t max_samples, uint32_t timeout_ms)
 {
     if (!dest || max_samples == 0) return 0;
+    speaker_id_mic_read_lock();
     const bool was_enabled = audio_hal_is_mic_enabled();
     audio_hal_set_mic_enabled(true);
 
@@ -1051,5 +1168,6 @@ size_t speaker_id_record(int16_t *dest, size_t max_samples, uint32_t timeout_ms)
         got += n;
     }
     if (!was_enabled) audio_hal_set_mic_enabled(false);
+    speaker_id_mic_read_unlock();
     return got;
 }
