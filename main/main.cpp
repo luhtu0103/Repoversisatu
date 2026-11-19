@@ -648,9 +648,11 @@ static void audio_task(void *arg)
         if (!mic_buffer_full) {
             const size_t mic_read_capacity = AUDIO_BUFFER_SIZE - buffer_pos;
             uint8_t *mic_read_dest = audio_buffer + buffer_pos;
+            speaker_id_mic_read_lock();
             bytes_read = assistant_active
                 ? audio_read_mic(mic_read_dest, mic_read_capacity)
                 : audio_read_mic_raw(mic_read_dest, mic_read_capacity);
+            speaker_id_mic_read_unlock();
         }
         if (!audio_hal_is_mic_enabled()) {
             buffer_pos = 0;
