@@ -41,24 +41,12 @@ static bool ensure_mounted(void)
                  (unsigned long)part->address);
 
         /*
-         * The user explicitly approved resetting AI Memory storage to recover
-         * from this persistent mount failure. Format only the dedicated
-         * "storage" SPIFFS partition; never touch the app/model partitions.
-         * On subsequent boots a valid filesystem should mount without format.
+         * Never auto-format the shared storage partition on a mount error:
+         * it also contains speaker profiles and persistent AI memory. Keep
+         * the existing bytes intact and let the caller report storage failure.
          */
-        ESP_LOGW(TAG, "SPIFFS storage gagal dipasang; reset filesystem storage diizinkan untuk pemulihan AI Memory.");
-        esp_err_t format_err = esp_spiffs_format(PARTITION_LABEL);
-        if (format_err != ESP_OK) {
-            ESP_LOGE(TAG, "Format SPIFFS gagal: %s", esp_err_to_name(format_err));
-            return false;
-        }
-
-        err = esp_vfs_spiffs_register(&conf);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Mount SPIFFS setelah format gagal: %s", esp_err_to_name(err));
-            return false;
-        }
-        ESP_LOGI(TAG, "Filesystem SPIFFS baru berhasil dibuat pada partisi storage kosong.");
+        ESP_LOGE(TAG, "Filesystem dipertahankan; tidak auto-format karena berisi profil suara dan memori AI.");
+        return false;
     }
 
     s_initialized = true;
