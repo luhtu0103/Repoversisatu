@@ -58,6 +58,10 @@ const char *speaker_id_status_text(speaker_id_status_t status);
 bool speaker_id_init(void);
 bool speaker_id_is_ready(void);
 
+/* Serializes mic queue reads between the live audio task and enrollment recording. */
+void speaker_id_mic_read_lock(void);
+void speaker_id_mic_read_unlock(void);
+
 int   speaker_id_profile_count(void);
 bool  speaker_id_has_profiles(void);
 bool  speaker_id_get_profile(int index, char *name, size_t name_size, int *samples);
