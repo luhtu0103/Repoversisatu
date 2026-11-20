@@ -1,7 +1,7 @@
-// Pemutar radio streaming MP3 untuk robot.
+// Pemutar radio streaming MP3/AAC untuk robot.
 //  - radio_resolve(): cari stasiun (preset + direktori radio-browser.info)
 //  - net_task: unduh stream HTTP/HTTPS ke buffer besar (PSRAM)
-//  - play_task: decode MP3 (minimp3), ubah ke mono 24 kHz, kirim ke speaker, gerakkan wajah
+//  - play_task: decode MP3 (minimp3) atau AAC (ESP Audio Codec), lalu ke mono 24 kHz
 #include "radio_player.h"
 #include "radio_dsp.h"
 #include "audio_hal.h"
@@ -10,6 +10,8 @@
 
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_audio_simple_dec.h"
+#include "esp_audio_simple_dec_default.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
@@ -50,10 +52,11 @@ static const char *TAG = "RADIO";
 // Stack task pemutar (byte). Decoder MP3 sendiri butuh ~17 KB; sisanya untuk suara/wajah/log.
 #define RADIO_PLAY_STACK 28672
 
-/* Stasiun siap pakai yang alamatnya sudah diperiksa (MP3 128 kbps, HTTPS). */
+/* Preset stream langsung. Menara FM memakai AAC-LC, bukan MP3. */
 struct preset_t { const char *alias; const char *name; const char *url; };
 static const preset_t kPresets[] = {
     {"beat", "The Beat Radio Bali", "https://c1.siar.us/radio/8030/stream"},
+    {"menara", "Menara FM Bali", "https://c1.siar.us:10280/menarafmbali"},
 };
 static const char *const kApiHosts[] = {
     "de1.api.radio-browser.info", "at1.api.radio-browser.info", "nl1.api.radio-browser.info",
@@ -619,7 +622,10 @@ static void play_task(void *)
 {
     constexpr size_t INBUF = 24 * 1024;
     int end_reason = 0;
-    mp3dec_t *dec = (mp3dec_t *)heap_caps_malloc(sizeof(mp3dec_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    const bool is_aac = (strstr(s_cur.url, "menarafmbali") != nullptr);
+    mp3dec_t *dec = is_aac ? nullptr : (mp3dec_t *)heap_caps_malloc(sizeof(mp3dec_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    esp_audio_simple_dec_handle_t aac_dec = nullptr;
+    bool aac_registered = false;
     uint8_t *in = (uint8_t *)heap_caps_malloc(INBUF, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     int16_t *pcm = (int16_t *)heap_caps_malloc(MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(int16_t),
                                                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -627,12 +633,32 @@ static void play_task(void *)
     int16_t *outbuf = (int16_t *)heap_caps_malloc(4096 * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     RadioResampler *rs = new RadioResampler();
 
-    if (!dec || !in || !pcm || !mono || !outbuf) {
+    if ((!is_aac && !dec) || !in || !pcm || !mono || !outbuf) {
         ESP_LOGE(TAG, "Memori tidak cukup untuk pemutar radio");
         end_reason = 2;
         goto finish;
     }
-    mp3dec_init(dec);
+    if (is_aac) {
+        const esp_audio_err_t reg_err = esp_audio_simple_dec_register_default();
+        if (reg_err != ESP_AUDIO_ERR_OK) {
+            ESP_LOGE(TAG, "Registrasi decoder AAC gagal: %d", (int)reg_err);
+            end_reason = 2;
+            goto finish;
+        }
+        aac_registered = true;
+        esp_audio_simple_dec_cfg_t cfg = {};
+        cfg.dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_AAC;
+        cfg.use_frame_dec = false;  // parser mencari batas frame AAC pada stream
+        const esp_audio_err_t open_err = esp_audio_simple_dec_open(&cfg, &aac_dec);
+        if (open_err != ESP_AUDIO_ERR_OK || !aac_dec) {
+            ESP_LOGE(TAG, "Membuka decoder AAC gagal: %d", (int)open_err);
+            end_reason = 2;
+            goto finish;
+        }
+        ESP_LOGI(TAG, "Decoder AAC aktif untuk Menara FM");
+    } else {
+        mp3dec_init(dec);
+    }
 
     {
         // Tunggu buffer terisi (prebuffer).
@@ -685,28 +711,77 @@ static void play_task(void *)
                 continue;
             }
 
-            memset(&info, 0, sizeof(info));
-            const int samples = mp3dec_decode_frame(dec, in + rp, (int)valid, pcm, &info);
-            if (info.frame_bytes > 0) {
-                const size_t fb = (size_t)info.frame_bytes > valid ? valid : (size_t)info.frame_bytes;
-                rp += fb;
-                valid -= fb;
+            int samples = 0;
+            int channels = 0;
+            uint32_t sample_hz = 0;
+            int bitrate_kbps = 0;
+            if (is_aac) {
+                esp_audio_simple_dec_raw_t raw = {};
+                raw.buffer = in + rp;
+                raw.len = (uint32_t)valid;
+                esp_audio_simple_dec_out_t frame = {};
+                frame.buffer = (uint8_t *)pcm;
+                frame.len = (uint32_t)(MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(int16_t));
+                const esp_audio_err_t decode_err = esp_audio_simple_dec_process(aac_dec, &raw, &frame);
+                if (raw.consumed > valid) raw.consumed = (uint32_t)valid;
+                rp += raw.consumed;
+                valid -= raw.consumed;
+                if (decode_err == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
+                    ESP_LOGE(TAG, "Buffer PCM AAC tidak cukup (perlu %lu byte)", (unsigned long)frame.needed_size);
+                    end_reason = 2;
+                    break;
+                }
+                if (decode_err != ESP_AUDIO_ERR_OK) {
+                    ESP_LOGW(TAG, "Frame AAC tidak valid: %d", (int)decode_err);
+                    if (valid > 0) { ++rp; --valid; }
+                    else vTaskDelay(1);
+                    continue;
+                }
+                if (frame.decoded_size > 0) {
+                    esp_audio_simple_dec_info_t aac_info = {};
+                    if (esp_audio_simple_dec_get_info(aac_dec, &aac_info) != ESP_AUDIO_ERR_OK ||
+                        aac_info.bits_per_sample != 16 || aac_info.channel == 0) {
+                        ESP_LOGW(TAG, "Info PCM AAC belum siap");
+                        continue;
+                    }
+                    channels = (int)aac_info.channel;
+                    sample_hz = aac_info.sample_rate;
+                    samples = (int)(frame.decoded_size / (sizeof(int16_t) * (size_t)channels));
+                    bitrate_kbps = (int)(aac_info.bitrate / 1000U);
+                }
+                if (samples <= 0) {
+                    if (raw.consumed == 0 && valid >= INBUF - 16) { ++rp; --valid; }
+                    else if (s_net_done && xStreamBufferBytesAvailable(s_sb) == 0 && valid == 0) { end_reason = 1; break; }
+                    else if (raw.consumed == 0) vTaskDelay(1);
+                    continue;
+                }
             } else {
-                // Belum cukup data untuk satu frame. Jika buffer penuh, buang sebagian.
-                if (rp + valid >= INBUF - 16 && valid > 1024) { rp += 1024; valid -= 1024; }
-                else if (s_net_done && xStreamBufferBytesAvailable(s_sb) == 0) { end_reason = 1; break; }
-                else vTaskDelay(1);
-                continue;
+                memset(&info, 0, sizeof(info));
+                samples = mp3dec_decode_frame(dec, in + rp, (int)valid, pcm, &info);
+                if (info.frame_bytes > 0) {
+                    const size_t fb = (size_t)info.frame_bytes > valid ? valid : (size_t)info.frame_bytes;
+                    rp += fb;
+                    valid -= fb;
+                } else {
+                    // Belum cukup data untuk satu frame. Jika buffer penuh, buang sebagian.
+                    if (rp + valid >= INBUF - 16 && valid > 1024) { rp += 1024; valid -= 1024; }
+                    else if (s_net_done && xStreamBufferBytesAvailable(s_sb) == 0) { end_reason = 1; break; }
+                    else vTaskDelay(1);
+                    continue;
+                }
+                channels = info.channels;
+                sample_hz = (uint32_t)info.hz;
+                bitrate_kbps = info.bitrate_kbps;
             }
-            if (samples <= 0 || info.channels <= 0 || info.hz <= 0) continue;
+            if (samples <= 0 || channels <= 0 || sample_hz == 0) continue;
 
-            if ((uint32_t)info.hz != cur_hz) {
-                cur_hz = (uint32_t)info.hz;
+            if (sample_hz != cur_hz) {
+                cur_hz = sample_hz;
                 rs->reset(cur_hz);
-                ESP_LOGI(TAG, "MP3: %u Hz, %d kanal, %d kbps", (unsigned)cur_hz, info.channels, info.bitrate_kbps);
+                ESP_LOGI(TAG, "%s: %u Hz, %d kanal, %d kbps", is_aac ? "AAC" : "MP3", (unsigned)cur_hz, channels, bitrate_kbps);
             }
             const int n = samples > 1152 ? 1152 : samples;
-            if (info.channels == 2) {
+            if (channels == 2) {
                 for (int i = 0; i < n; ++i) mono[i] = (int16_t)(((int32_t)pcm[2 * i] + (int32_t)pcm[2 * i + 1]) / 2);
             } else {
                 memcpy(mono, pcm, (size_t)n * sizeof(int16_t));
@@ -743,6 +818,8 @@ finish:
     display_set_gemini_text("");
     display_set_user_text("");
     s_stop = true;                       // pastikan net_task ikut berhenti
+    if (aac_dec) esp_audio_simple_dec_close(aac_dec);
+    if (aac_registered) esp_audio_simple_dec_unregister_default();
     if (dec) heap_caps_free(dec);
     if (in) heap_caps_free(in);
     if (pcm) heap_caps_free(pcm);
