@@ -41,8 +41,11 @@ extern "C" void oled2_face_set_speaker_level(uint8_t level);
 static const char *TAG = "RADIO";
 
 /* ---- Pengaturan yang boleh diubah ---- */
-// Volume musik dalam persen. Musik radio biasanya lebih keras dari suara Gemini; 60 = mirip.
-#define RADIO_GAIN_PERCENT 60
+// Volume musik dalam persen. Sebelumnya 60 terlalu pelan di robot; 150 = 1,5x. Turunkan jika pecah.
+#define RADIO_GAIN_PERCENT 150
+// Volume khusus Menara FM (AAC). Siarannya pelan, jadi dikuatkan. Naikkan jika masih pelan
+// (150 = 1,5x, 250 = 2,5x); turunkan jika suara pecah.
+#define RADIO_GAIN_AAC_PERCENT 220
 // Buffer unduhan (PSRAM). 128 KB = sekitar 8 detik pada 128 kbps.
 #define RADIO_STREAM_BUFFER_BYTES (128 * 1024)
 // Mulai memutar setelah buffer terisi segini (sekitar 3 detik pada 128 kbps).
@@ -801,7 +804,9 @@ static void play_task(void *)
 
             int32_t peak = 0;
             for (size_t i = 0; i < out_n; ++i) {
-                int32_t v = ((int32_t)outbuf[i] * RADIO_GAIN_PERCENT) / 100;
+                int32_t v = ((int32_t)outbuf[i] * (is_aac ? RADIO_GAIN_AAC_PERCENT : RADIO_GAIN_PERCENT)) / 100;
+                if (v > 32767) v = 32767;          // cegah suara pecah/meluap
+                else if (v < -32768) v = -32768;
                 outbuf[i] = (int16_t)v;
                 const int32_t a = v < 0 ? -v : v;
                 if (a > peak) peak = a;
