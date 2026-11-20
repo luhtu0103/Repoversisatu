@@ -1,5 +1,5 @@
 #pragma once
-// Pemutar radio streaming MP3 (HTTP/HTTPS) lewat speaker robot.
+// Pemutar radio streaming MP3/AAC (HTTP/HTTPS) lewat speaker robot.
 // Alur: radio_resolve() cari stasiun -> radio_set_pending() -> radio_start_pending() -> main
 // menunggu radio_is_active() false (sentuh sensor -> radio_stop()).
 #include <stdbool.h>
