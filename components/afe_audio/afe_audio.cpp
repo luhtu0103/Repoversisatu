@@ -48,9 +48,9 @@ bool afe_audio_init(void)
     afe_config->vad_init = true;
     afe_config->agc_init = true;
     afe_config->agc_mode = AFE_AGC_MODE_WEBRTC;
-    afe_config->agc_compression_gain_db = 9;
+    afe_config->agc_compression_gain_db = 12;
     afe_config->agc_target_level_dbfs = 3;
-    afe_config->afe_linear_gain = 1.0f;
+    afe_config->afe_linear_gain = 2.0f;
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
     afe_config->fixed_output_channel = true;
 
@@ -110,7 +110,7 @@ bool afe_audio_init(void)
 
     afe_handle->print_pipeline(afe_data);
     ready = true;
-    ESP_LOGI(TAG, "AFE READY: 16kHz mono feed=%u samples fetch=%u samples; NS=ON AGC=ON VAD=ON AEC=OFF",
+    ESP_LOGI(TAG, "AFE READY: 16kHz mono feed=%u samples fetch=%u samples; NS=ON AGC=ON (compression gain=12 dB, linear gain=2.0x) VAD=ON AEC=OFF",
              (unsigned)feed_samples, (unsigned)fetch_samples);
     return true;
 }
