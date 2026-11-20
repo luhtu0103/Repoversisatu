@@ -12,6 +12,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_audio_simple_dec.h"
 #include "esp_audio_simple_dec_default.h"
+#include "esp_audio_dec_default.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
@@ -626,6 +627,7 @@ static void play_task(void *)
     mp3dec_t *dec = is_aac ? nullptr : (mp3dec_t *)heap_caps_malloc(sizeof(mp3dec_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     esp_audio_simple_dec_handle_t aac_dec = nullptr;
     bool aac_registered = false;
+    bool aac_core_registered = false;
     uint8_t *in = (uint8_t *)heap_caps_malloc(INBUF, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     int16_t *pcm = (int16_t *)heap_caps_malloc(MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(int16_t),
                                                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -639,6 +641,15 @@ static void play_task(void *)
         goto finish;
     }
     if (is_aac) {
+        // Dua langkah: (1) daftarkan decoder audio AAC-nya, (2) daftarkan pembungkus "simple decoder".
+        // Tanpa langkah 1 muncul error "Decoder AAC not registered" (-7).
+        const esp_audio_err_t core_err = esp_audio_dec_register_default();
+        if (core_err != ESP_AUDIO_ERR_OK) {
+            ESP_LOGE(TAG, "Registrasi decoder audio gagal: %d", (int)core_err);
+            end_reason = 2;
+            goto finish;
+        }
+        aac_core_registered = true;
         const esp_audio_err_t reg_err = esp_audio_simple_dec_register_default();
         if (reg_err != ESP_AUDIO_ERR_OK) {
             ESP_LOGE(TAG, "Registrasi decoder AAC gagal: %d", (int)reg_err);
@@ -820,6 +831,7 @@ finish:
     s_stop = true;                       // pastikan net_task ikut berhenti
     if (aac_dec) esp_audio_simple_dec_close(aac_dec);
     if (aac_registered) esp_audio_simple_dec_unregister_default();
+    if (aac_core_registered) esp_audio_dec_unregister_default();
     if (dec) heap_caps_free(dec);
     if (in) heap_caps_free(in);
     if (pcm) heap_caps_free(pcm);
