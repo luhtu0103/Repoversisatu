@@ -463,8 +463,9 @@ static void led_status_task(void *arg)
 static void audio_task(void *arg)
 {
     (void)arg;
-    /* Buffer up to ~1 second of 16 kHz PCM while WebSocket TX is back-pressured. */
-    constexpr size_t AUDIO_BUFFER_SIZE = 32768;
+    /* Penyangga suara mic: ~6 detik PCM 16 kHz. Setelah "Hi ESP" sambungan ke Gemini butuh ~3 detik;
+     * selama itu ucapan pengguna disimpan di sini lalu dikirim begitu sesi siap (tidak hilang). */
+    constexpr size_t AUDIO_BUFFER_SIZE = 196608;
     uint8_t *audio_buffer = (uint8_t *)heap_caps_malloc(
         AUDIO_BUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     const char *audio_buffer_location = "PSRAM";
@@ -514,7 +515,7 @@ static void audio_task(void *arg)
     uint64_t mic_buffer_lost_bytes = 0;
     uint32_t consecutive_tx_enqueue_failures = 0;
     int64_t tx_backpressure_start_us = 0;
-    constexpr int64_t TX_BACKPRESSURE_ABORT_US = 2000000LL;
+    constexpr int64_t TX_BACKPRESSURE_ABORT_US = 4000000LL;   // 4 detik (sebelumnya 2): cukup untuk melepas tumpukan awal sesi
     int64_t last_tx_diag_us = 0;
     int64_t last_activity_debug_us = 0;
     static int last_wake_result = 0;
@@ -640,6 +641,16 @@ static void audio_task(void *arg)
 
         // WakeNet gets the same raw I2S PCM path as Repo5. Keep NSNet2 and
         // conversation gain exclusively on the active Gemini audio path.
+        // Sesi Gemini belum siap dan penyangga hampir penuh: buang suara TERTUA (2 detik),
+        // supaya yang tersimpan selalu ucapan terbaru, bukan yang paling lama.
+        if (assistant_active && !websocket_is_connected() &&
+            buffer_pos + 4096 > AUDIO_BUFFER_SIZE) {
+            constexpr size_t DROP_OLD_BYTES = 65536;
+            const size_t drop = buffer_pos < DROP_OLD_BYTES ? buffer_pos : DROP_OLD_BYTES;
+            memmove(audio_buffer, audio_buffer + drop, buffer_pos - drop);
+            buffer_pos -= drop;
+            mic_buffer_lost_bytes += drop;
+        }
         const bool mic_buffer_full = buffer_pos >= AUDIO_BUFFER_SIZE;
         // When TX is back-pressured, do not consume more PCM just to discard it.
         // Keep the buffered audio intact and let the capture queue's drop counter
@@ -870,11 +881,19 @@ static void audio_task(void *arg)
         // frames while keeping microphone capture independent of network TX.
         // Gemini handles speech start/end detection server-side.
         constexpr size_t GEMINI_MIC_CHUNK_BYTES = 1280;
-        while (buffer_pos >= GEMINI_MIC_CHUNK_BYTES) {
-            if (!audio_hal_is_mic_enabled()) { buffer_pos = 0; break; }
+        // Kirim dari "send_off" (tanpa memindahkan seluruh penyangga tiap potongan; penyangga besar).
+        size_t send_off = 0;
+        while (buffer_pos - send_off >= GEMINI_MIC_CHUNK_BYTES) {
+            if (!audio_hal_is_mic_enabled()) { buffer_pos = 0; send_off = 0; break; }
+            /* Sesi belum siap (menyambung): simpan saja, jangan hitung sebagai macet dan jangan dibuang. */
+            if (!websocket_is_connected()) {
+                tx_backpressure_start_us = 0;
+                consecutive_tx_enqueue_failures = 0;
+                break;
+            }
             /* Keep PCM buffered until TX confirms enqueue. If the queue is full,
              * retry on the next loop instead of consuming and losing this frame. */
-            if (!websocket_send_audio_data(audio_buffer, GEMINI_MIC_CHUNK_BYTES)) {
+            if (!websocket_send_audio_data(audio_buffer + send_off, GEMINI_MIC_CHUNK_BYTES)) {
                 consecutive_tx_enqueue_failures++;
                 const int64_t now_us = esp_timer_get_time();
                 if (tx_backpressure_start_us == 0) tx_backpressure_start_us = now_us;
@@ -882,11 +901,12 @@ static void audio_task(void *arg)
                     /* Sustained enqueue backpressure: drop buffered microphone
                      * audio, reset the producer-side buffer, but keep the
                      * current WebSocket and Gemini session alive. */
-                    ESP_LOGW(TAG, "TX backpressure > 2 detik; audio tertahan dibuang, sesi Gemini tetap aktif");
+                    ESP_LOGW(TAG, "TX backpressure > 4 detik; audio tertahan dibuang, sesi Gemini tetap aktif");
                     tx_backpressure_start_us = 0;
                     consecutive_tx_enqueue_failures = 0;
                     mic_buffer_lost_bytes += buffer_pos;
                     buffer_pos = 0;
+                    send_off = 0;
                     vTaskDelay(pdMS_TO_TICKS(10));
                     break;
                 }
@@ -906,8 +926,11 @@ static void audio_task(void *arg)
             consecutive_tx_enqueue_failures = 0;
             tx_backpressure_start_us = 0;
 
-            size_t remainder = buffer_pos - GEMINI_MIC_CHUNK_BYTES;
-            if (remainder > 0) memmove(audio_buffer, audio_buffer + GEMINI_MIC_CHUNK_BYTES, remainder);
+            send_off += GEMINI_MIC_CHUNK_BYTES;
+        }
+        if (send_off > 0) {
+            const size_t remainder = buffer_pos - send_off;
+            if (remainder > 0) memmove(audio_buffer, audio_buffer + send_off, remainder);
             buffer_pos = remainder;
         }
 
