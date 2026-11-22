@@ -12,6 +12,14 @@
 #include <string.h>
 
 static const char *TAG = "AUDIO_HAL";
+
+/* ---- Pengaturan yang boleh diubah ----
+ * Jalur suara ke Gemini:
+ *   1 = lewat AFE (penekan noise + AGC)           -> bersih, tetapi bisa ada artefak olahan
+ *   0 = suara mentah + penguatan sederhana        -> alami; coba ini jika Gemini sering salah dengar
+ * Cara menguji: ubah angkanya, build, bicara beberapa kalimat sama, bandingkan teks yang diterima Gemini. */
+#define GEMINI_MIC_USE_AFE 1
+#define GEMINI_RAW_GAIN_X 4      // penguatan suara mentah (hanya jika GEMINI_MIC_USE_AFE = 0)
 extern "C" void oled2_face_set_mic_level(uint8_t level);
 extern "C" void oled2_face_set_speaker_level(uint8_t level);
 static volatile bool mic_enabled = true;
@@ -302,6 +310,24 @@ size_t audio_read_mic(uint8_t *dest, size_t max_len)
 
     const size_t samples = read_captured_pcm(pcm_frame, max_samples);
     if (samples == 0) return 0;
+
+#if !GEMINI_MIC_USE_AFE
+    {
+        // Suara mentah: buang offset DC mikrofon (filter 1 kutub), lalu kuatkan dengan batas aman.
+        static int32_t dc = 0;
+        int16_t *out = reinterpret_cast<int16_t *>(dest);
+        const size_t n = samples < max_samples ? samples : max_samples;
+        for (size_t i = 0; i < n; ++i) {
+            const int32_t x = pcm_frame[i];
+            dc += (x - dc) >> 9;                         // pelacak offset lambat (~30 ms)
+            int32_t v = (x - dc) * GEMINI_RAW_GAIN_X;
+            if (v > INT16_MAX) v = INT16_MAX;
+            if (v < INT16_MIN) v = INT16_MIN;
+            out[i] = (int16_t)v;
+        }
+        return n * sizeof(int16_t);
+    }
+#endif
 
     if (afe_audio_is_ready() && samples == afe_frame_samples) {
         size_t out_capacity = max_len / sizeof(int16_t);
