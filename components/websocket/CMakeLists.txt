@@ -19,6 +19,7 @@ idf_component_register(
         esp-tls
         esp_http_client
         esp_event
+        esp_wifi
         cjson
         mbedtls
         display
