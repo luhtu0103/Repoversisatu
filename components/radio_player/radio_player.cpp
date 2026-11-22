@@ -805,9 +805,8 @@ static void play_task(void *)
             int32_t peak = 0;
             for (size_t i = 0; i < out_n; ++i) {
                 int32_t v = ((int32_t)outbuf[i] * (is_aac ? RADIO_GAIN_AAC_PERCENT : RADIO_GAIN_PERCENT)) / 100;
-                if (v > 32767) v = 32767;          // cegah suara pecah/meluap
-                else if (v < -32768) v = -32768;
-                outbuf[i] = (int16_t)v;
+                outbuf[i] = radio_soft_limit(v);   // puncak dilunakkan, bukan dipotong rata
+                v = outbuf[i];
                 const int32_t a = v < 0 ? -v : v;
                 if (a > peak) peak = a;
             }
