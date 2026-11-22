@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "esp_websocket_client.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -81,6 +82,14 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
 
         case WEBSOCKET_EVENT_ERROR:
             ESP_LOGE(TAG, "WebSocket Error!");
+            {
+                wifi_ap_record_t ap = {};
+                if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
+                    ESP_LOGE(TAG, "Wi-Fi saat error: RSSI=%d dBm kanal=%d (lebih kecil dari -75 = sinyal lemah)",
+                             (int)ap.rssi, (int)ap.primary);
+                else
+                    ESP_LOGE(TAG, "Wi-Fi saat error: tidak terhubung ke AP");
+            }
             now_ms = (uint32_t)(esp_timer_get_time() / 1000);
             ESP_LOGE(TAG, "WS activity before error: connected=%d setup=%d tx_error=%d generation=%lu rx_age_ms=%lu tx_age_ms=%lu tx_fail_count=%lu",
                      (int)is_connected, (int)setup_complete, (int)websocket_tx_error,
