@@ -147,7 +147,10 @@ size_t afe_audio_process_frame(const int16_t *input,
 
     // Bound AFE waiting time so microphone capture cannot stall for a quarter-second.
     // A missing frame falls back to raw PCM in audio_hal instead of blocking the live pipeline.
-    afe_fetch_result_t *result = afe_handle->fetch_with_delay(afe_data, pdMS_TO_TICKS(40));
+    // Panggilan pertama setelah AFE "dingin" (awal sesi) butuh waktu lebih lama; setelah itu 40 ms cukup.
+    static bool warmed = false;
+    afe_fetch_result_t *result = afe_handle->fetch_with_delay(afe_data, pdMS_TO_TICKS(warmed ? 40 : 150));
+    if (result && result->ret_value != ESP_FAIL && result->data && result->data_size > 0) warmed = true;
     if (!result || result->ret_value == ESP_FAIL || !result->data || result->data_size <= 0) {
         ++fetch_fail_count;
         if (fetch_fail_count == 1 || (fetch_fail_count % 50U) == 0)
