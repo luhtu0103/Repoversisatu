@@ -3,6 +3,7 @@
 #include "display.h"
 #include "wifi_manager.h"
 #include "esp_log.h"
+#include "esp_wifi.h"
 #include "esp_websocket_client.h"
 #include "esp_crt_bundle.h"
 #include "mbedtls/base64.h"
@@ -310,9 +311,14 @@ static void websocket_tx_task(void *arg)
                     else __atomic_add_fetch(&websocket_tx_fail_count, 1U, __ATOMIC_RELAXED);
                     int64_t send_elapsed_ms = (esp_timer_get_time() - send_start_us) / 1000;
                     if (sent == json_len) {
-                        if (send_elapsed_ms >= 100)
-                            ESP_LOGW(TAG, "TX audio send_text slow: duration=%lldms bytes=%d pcm_chunk=%u offset=%u/%u",
-                                     (long long)send_elapsed_ms, json_len, (unsigned)chunk_len, (unsigned)offset, (unsigned)cmd.len);
+                        if (send_elapsed_ms >= 100) {
+                            // Kirim lambat biasanya karena paket Wi-Fi/internet hilang lalu dikirim ulang.
+                            // RSSI dicatat supaya terlihat apakah sinyal Wi-Fi lemah saat itu.
+                            wifi_ap_record_t ap = {};
+                            const int rssi = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? (int)ap.rssi : 0;
+                            ESP_LOGW(TAG, "TX audio send_text slow: duration=%lldms bytes=%d pcm_chunk=%u offset=%u/%u rssi=%d dBm",
+                                     (long long)send_elapsed_ms, json_len, (unsigned)chunk_len, (unsigned)offset, (unsigned)cmd.len, rssi);
+                        }
                         chunk_sent = true;
                         break;
                     }
