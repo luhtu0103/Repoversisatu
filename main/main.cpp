@@ -1014,10 +1014,21 @@ extern "C" void app_main()
     debug_network_path(); vTaskDelay(pdMS_TO_TICKS(1000)); face_set_state(FACE_SLEEP); display_status("Sistem siap. Katakan Hi, ESP...");
 
     BaseType_t task_result = xTaskCreate(audio_task, "audio_task", 10240, NULL, 5, NULL); if (task_result != pdPASS) ESP_LOGE(TAG, "Gagal membuat audio_task!"); else ESP_LOGI(TAG, "audio_task berhasil dimulai.");
-    // OTA: setelah hidup normal 20 detik, tandai program ini sehat (batalkan rollback),
-    // lalu cek diam-diam apakah ada versi baru di GitHub (hanya dicatat di log).
+    // OTA: setelah hidup normal 20 detik, tandai program ini sehat (batalkan rollback).
     vTaskDelay(pdMS_TO_TICKS(20000));
     ota_update_mark_valid();
-    (void)ota_update_run_async(false, NULL, NULL);
+    // Cek diam-diam versi baru di GitHub (hanya dicatat di log). Tunggu sampai robot
+    // benar-benar menganggur: koneksi TLS tambahan saat Gemini sedang menyambung
+    // menghabiskan RAM internal dan bisa menggagalkan sambungan Gemini.
+    for (int i = 0; i < 300; ++i) {
+        if (!assistant_active && !websocket_lifecycle_busy() && !radio_is_active()) {
+            vTaskDelay(pdMS_TO_TICKS(3000));   // pastikan benar-benar tenang
+            if (!assistant_active && !websocket_lifecycle_busy() && !radio_is_active()) {
+                (void)ota_update_run_async(false, NULL, NULL);
+                break;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
     while (1) vTaskDelay(pdMS_TO_TICKS(1000));
 }
