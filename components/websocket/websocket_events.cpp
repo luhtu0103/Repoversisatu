@@ -70,6 +70,22 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
                                     (uint8_t)data->data_ptr[1];
                     ESP_LOGW(TAG, "CLOSE CODE: %u (0x%04X)",
                              (unsigned)code, (unsigned)code);
+                    if (data->data_len > 2) {
+                        char reason[96] = {};
+                        size_t rl = (size_t)data->data_len - 2;
+                        if (rl > sizeof(reason) - 1) rl = sizeof(reason) - 1;
+                        memcpy(reason, data->data_ptr + 2, rl);
+                        for (size_t i = 0; i < rl; ++i)
+                            if ((unsigned char)reason[i] < 0x20) reason[i] = ' ';
+                        ESP_LOGW(TAG, "CLOSE ALASAN dari Gemini: %s", reason);
+                    }
+                    /* 1008 = ditolak server. Setelah putus mendadak, melanjutkan sesi dengan handle lama
+                     * ditolak terus-menerus (lingkaran sambung ulang sampai 15 detik). Buang handle supaya
+                     * sambung ulang berikutnya memakai sesi Gemini yang baru dan langsung berhasil. */
+                    if (code == 1008 && session_handle[0] != '\0') {
+                        ESP_LOGW(TAG, "Handle sesi ditolak server (1008); dibuang, sambung ulang memakai sesi baru");
+                        clear_session_handle();
+                    }
                 }
                 break;
             }
