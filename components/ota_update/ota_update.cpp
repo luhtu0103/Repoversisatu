@@ -1,5 +1,6 @@
 #include "ota_update.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -9,6 +10,8 @@
 #include "esp_https_ota.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "OTA_UPDATE";
 static constexpr char VERSION_URL[] =
@@ -58,7 +61,7 @@ esp_err_t ota_update_check_and_apply(void)
     if (app == nullptr || !parse_version_number(app->version, &current_version)) {
         ESP_LOGW(TAG, "Versi firmware lokal bukan angka; OTA dilewati (version='%s')",
                  app ? app->version : "(null)");
-        return ESP_ERR_INVALID_VERSION;
+        return ESP_FAIL;
     }
 
     version_buffer remote = {};
