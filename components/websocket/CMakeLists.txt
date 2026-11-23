@@ -31,6 +31,7 @@ idf_component_register(
         servo_head
         alarm
         radio_player
+        ota_update
 )
 
 target_link_libraries(${COMPONENT_LIB} INTERFACE
