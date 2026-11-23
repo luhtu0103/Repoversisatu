@@ -818,8 +818,10 @@ static void audio_task(void *arg)
                 disconnect_wait_start_us = 0;
                 continue;
             }
-            buffer_pos = 0;
-            vTaskDelay(pdMS_TO_TICKS(100));
+            // JANGAN buang suara: simpan di penyangga (maks 6 detik, yang tertua dibuang di atas)
+            // dan kirim begitu sesi siap lagi. Sebelumnya di sini penyangga dikosongkan dan loop tidur
+            // 100 ms, sehingga ucapan saat menyambung hilang ("MIC capture pool empty").
+            vTaskDelay(1);
             continue;
         }
         disconnect_wait_start_us = 0;
