@@ -3,7 +3,6 @@
 #include "display.h"
 #include "wifi_manager.h"
 #include "esp_log.h"
-#include "esp_wifi.h"
 #include "esp_websocket_client.h"
 #include "esp_crt_bundle.h"
 #include "mbedtls/base64.h"
@@ -311,14 +310,9 @@ static void websocket_tx_task(void *arg)
                     else __atomic_add_fetch(&websocket_tx_fail_count, 1U, __ATOMIC_RELAXED);
                     int64_t send_elapsed_ms = (esp_timer_get_time() - send_start_us) / 1000;
                     if (sent == json_len) {
-                        if (send_elapsed_ms >= 100) {
-                            // Kirim lambat biasanya karena paket Wi-Fi/internet hilang lalu dikirim ulang.
-                            // RSSI dicatat supaya terlihat apakah sinyal Wi-Fi lemah saat itu.
-                            wifi_ap_record_t ap = {};
-                            const int rssi = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? (int)ap.rssi : 0;
-                            ESP_LOGW(TAG, "TX audio send_text slow: duration=%lldms bytes=%d pcm_chunk=%u offset=%u/%u rssi=%d dBm",
-                                     (long long)send_elapsed_ms, json_len, (unsigned)chunk_len, (unsigned)offset, (unsigned)cmd.len, rssi);
-                        }
+                        if (send_elapsed_ms >= 100)
+                            ESP_LOGW(TAG, "TX audio send_text slow: duration=%lldms bytes=%d pcm_chunk=%u offset=%u/%u",
+                                     (long long)send_elapsed_ms, json_len, (unsigned)chunk_len, (unsigned)offset, (unsigned)cmd.len);
                         chunk_sent = true;
                         break;
                     }
@@ -387,7 +381,9 @@ bool websocket_tx_enqueue_audio(const uint8_t *data, size_t len, uint32_t genera
         if (result) *result = WS_TX_ENQUEUE_GENERATION_MISMATCH;
         return false;
     }
-    uint8_t *copy = (uint8_t *)malloc(len);
+    /* Salinan suara ditaruh di PSRAM (antrean besar tidak boleh menghabiskan RAM internal). */
+    uint8_t *copy = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!copy) copy = (uint8_t *)malloc(len);
     if (!copy) {
         if (result) *result = WS_TX_ENQUEUE_MALLOC_FAILED;
         return false;
@@ -438,7 +434,9 @@ void websocket_app_start(void)
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
     cfg.skip_cert_common_name_check = false;
     cfg.cert_common_name = "generativelanguage.googleapis.com";
-    cfg.network_timeout_ms = 15000;
+    /* Batas tunggu tulis/baca socket. Sebelumnya 15 detik: saat jaringan macet robot menunggu 15 detik
+     * baru sadar putus, lalu menunggu 15 detik lagi untuk menutup, sehingga sesi berakhir. */
+    cfg.network_timeout_ms = 6000;
     cfg.disable_auto_reconnect = true;
     /* Match RepoV3's transport keepalive policy. Keep Repo5's smaller TLS
      * buffer to reduce internal-heap pressure on ESP32-S3. */
