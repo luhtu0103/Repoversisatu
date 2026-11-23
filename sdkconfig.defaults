@@ -54,3 +54,7 @@ CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
 
 # Use minimp3 for MP3; disable esp_audio_codec MP3 to avoid duplicate symbols.
 CONFIG_AUDIO_DECODER_MP3_SUPPORT=n
+
+# OTA: bila program baru gagal jalan (restart sebelum ditandai sehat), bootloader
+# otomatis kembali ke program lama. Tabel partisi punya ota_0 dan ota_1.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
