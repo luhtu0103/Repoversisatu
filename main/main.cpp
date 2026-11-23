@@ -10,6 +10,7 @@
 #include "touch_emotion.h"
 #include "servo_head.h"
 #include "led_rgb.h"
+#include "ota_update.h"
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -545,7 +546,7 @@ extern "C" void app_main()
     wifi_init_sta();
     if (!wifi_wait_for_connection(15000)) { ESP_LOGE(TAG, "Wi-Fi tidak mendapatkan IP."); display_status("WiFi Gagal!"); face_set_state(FACE_SLEEP); while (1) vTaskDelay(pdMS_TO_TICKS(1000)); }
 
-    esp_wifi_set_ps(WIFI_PS_NONE); ESP_LOGI(TAG, "WiFi power save dimatikan"); ESP_LOGI(TAG, "WIFI READY - lanjut ke NTP"); sync_sntp_time(); ESP_LOGI(TAG, "Menunggu 1 detik..."); vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_wifi_set_ps(WIFI_PS_NONE); ESP_LOGI(TAG, "WiFi power save dimatikan"); ESP_LOGI(TAG, "WIFI READY - lanjut ke NTP"); sync_sntp_time(); ESP_LOGI(TAG, "Memeriksa update firmware OTA..."); ota_update_check_and_apply(); ESP_LOGI(TAG, "Menunggu 1 detik..."); vTaskDelay(pdMS_TO_TICKS(1000));
     debug_network_path(); vTaskDelay(pdMS_TO_TICKS(1000)); face_set_state(FACE_SLEEP); display_status("Sistem siap. Katakan Hi, ESP...");
 
     BaseType_t task_result = xTaskCreate(audio_task, "audio_task", 10240, NULL, 5, NULL); if (task_result != pdPASS) ESP_LOGE(TAG, "Gagal membuat audio_task!"); else ESP_LOGI(TAG, "audio_task berhasil dimulai.");
