@@ -20,7 +20,9 @@
 #define WS_RX_STREAM_COMPACT_SIZE (12 * 1024)
 #define WS_TX_AUDIO_SIZE 3200
 /* Sixty-four commands absorb short TX stalls without immediately dropping mic audio. */
-#define WS_TX_QUEUE_LENGTH 64
+/* Antrean kirim suara: 160 x 40 ms = ~6,4 detik. Kirim ke server kadang tertahan 1-2,5 detik;
+ * antrean besar menampung suara selama itu supaya tidak ada ucapan yang terbuang. */
+#define WS_TX_QUEUE_LENGTH 160
 #define WS_RX_QUEUE_LENGTH WS_RX_SLOT_COUNT
 
 typedef enum { WS_TX_COMMAND_SETUP = 1, WS_TX_COMMAND_AUDIO = 2, WS_TX_COMMAND_TEXT = 3 } ws_tx_command_type_t;
