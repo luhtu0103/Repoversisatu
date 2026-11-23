@@ -1,14 +1,20 @@
-name: Repo5-compatible ESP32-S3 firmware
+name: ESP32-S3 firmware
 
 on:
   push:
-    branches: main
+    branches:
+      - main
+      - feature/free-web-search
+      - pengenalan-suara
   pull_request:
-    branches: main
+    branches:
+      - main
+      - feature/free-web-search
+      - pengenalan-suara
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -39,7 +45,11 @@ jobs:
           grep -q '^CONFIG_PARTITION_TABLE_CUSTOM=y' sdkconfig.defaults
           grep -q '^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/partitions.csv"' sdkconfig.defaults
           grep -q '^CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y' sdkconfig.defaults
-          grep -q '^model,.*0x410000,0x400000' partitions/partitions.csv
+          grep -Eq '^model,.*0x620000,[[:space:]]*0x400000' partitions/partitions.csv
+          grep -q '^ota_0,' partitions/partitions.csv
+          grep -q '^ota_1,' partitions/partitions.csv
+          grep -q '^otadata,' partitions/partitions.csv
+          grep -q '^CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y' sdkconfig.defaults
 
       - name: Configure ESP-IDF target
         run: |
@@ -49,7 +59,7 @@ jobs:
       - name: Build firmware
         run: |
           . /opt/esp/idf/export.sh
-          idf.py build
+          idf.py -DPROJECT_VER="${{ github.run_number }}" build
 
       - name: Verify effective configuration and outputs
         run: |
@@ -62,6 +72,11 @@ jobs:
           test -s build/Repoversiempat.elf
           test -s build/bootloader/bootloader.bin
           test -s build/partition_table/partition-table.bin
+          grep -q '^CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y' sdkconfig
+          # Program harus muat di satu kamar OTA (3 MB).
+          FW_SIZE=$(stat -c %s build/Repoversiempat.bin)
+          echo "Ukuran firmware: $FW_SIZE byte (batas $((0x300000)))"
+          test "$FW_SIZE" -le $((0x300000))
 
       - name: Fetch pinned ESP-SR models
         run: |
@@ -117,6 +132,7 @@ jobs:
           cp build/Repoversiempat.elf artifact/firmware.elf
           cp build/srmodels/srmodels.bin artifact/srmodels.bin
           cp build/merged-binary.bin artifact/merged-binary.bin
+          echo "${{ github.run_number }}" > artifact/version.txt
           test -s artifact/firmware.bin
           test -s artifact/bootloader.bin
           test -s artifact/partitions.bin
@@ -138,6 +154,34 @@ jobs:
             artifact/firmware.elf
             artifact/srmodels.bin
             artifact/merged-binary.bin
-            
+            artifact/version.txt
           if-no-files-found: error
           retention-days: 14
+
+  # Kirim firmware.bin + version.txt ke GitHub Release terbaru supaya robot bisa OTA.
+  release:
+    name: Publish OTA release
+    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/pengenalan-suara' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: Repo5-ESP32S3-Firmware
+          path: artifact
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          files: |
+            artifact/firmware.bin
+            artifact/version.txt
+            artifact/merged-binary.bin
+            artifact/bootloader.bin
+            artifact/partitions.bin
+            artifact/srmodels.bin
