@@ -628,7 +628,10 @@ static void audio_task(void *arg)
         // The I2S capture task stays active; not reading here fills its queue and
         // causes avoidable MIC capture drops. Drain raw PCM only: never send or
         // replay audio captured while uplink is paused/back-pressured.
-        if (websocket_mic_uplink_paused || websocket_is_backpressured()) {
+        // Hanya saat uplink dijeda (pencarian web) suara dibuang. Saat antrean kirim penuh (jaringan
+        // sedang lambat), suara TETAP dibaca dan ditahan di penyangga 6 detik lalu dikirim menyusul;
+        // dulu suara dibuang di sini sehingga ucapan hilang.
+        if (websocket_mic_uplink_paused) {
             static uint8_t discard_pcm[1024];
             if (audio_hal_is_mic_enabled())
                 (void)audio_read_mic_raw(discard_pcm, sizeof(discard_pcm));
@@ -807,8 +810,8 @@ static void audio_task(void *arg)
              */
             const int64_t now_us = esp_timer_get_time();
             if (disconnect_wait_start_us == 0) disconnect_wait_start_us = now_us;
-            if (now_us - disconnect_wait_start_us > 15 * 1000000LL) {
-                ESP_LOGW(TAG, "WebSocket tidak pulih dalam 15 detik setelah terputus; akhiri sesi dan kembali ke wake word.");
+            if (now_us - disconnect_wait_start_us > 25 * 1000000LL) {
+                ESP_LOGW(TAG, "WebSocket tidak pulih dalam 25 detik setelah terputus; akhiri sesi dan kembali ke wake word.");
                 display_status("Menunggu wakeword");
                 websocket_request_fresh_session_reset();
                 websocket_disconnect();
@@ -818,10 +821,8 @@ static void audio_task(void *arg)
                 disconnect_wait_start_us = 0;
                 continue;
             }
-            // JANGAN buang suara: simpan di penyangga (maks 6 detik, yang tertua dibuang di atas)
-            // dan kirim begitu sesi siap lagi. Sebelumnya di sini penyangga dikosongkan dan loop tidur
-            // 100 ms, sehingga ucapan saat menyambung hilang ("MIC capture pool empty").
-            vTaskDelay(1);
+            buffer_pos = 0;
+            vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
         disconnect_wait_start_us = 0;
