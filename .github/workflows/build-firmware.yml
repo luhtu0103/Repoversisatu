@@ -45,7 +45,7 @@ jobs:
           grep -q '^CONFIG_PARTITION_TABLE_CUSTOM=y' sdkconfig.defaults
           grep -q '^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/partitions.csv"' sdkconfig.defaults
           grep -q '^CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y' sdkconfig.defaults
-          grep -q '^model,.*0x620000,0x400000' partitions/partitions.csv
+          grep -Eq '^model,.*0x620000,[[:space:]]*0x400000' partitions/partitions.csv
           grep -q '^ota_0,' partitions/partitions.csv
           grep -q '^ota_1,' partitions/partitions.csv
           grep -q '^otadata,' partitions/partitions.csv
