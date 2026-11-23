@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - feature/free-web-search
+      - feature/ota-firmware
       - pengenalan-suara
   pull_request:
     branches:
