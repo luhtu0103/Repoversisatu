@@ -6,6 +6,7 @@
 #include "ai_memory.h"
 #include "servo_head.h"
 #include "alarm.h"
+#include "ota_update.h"
 
 #include "esp_attr.h"
 #include "esp_log.h"
@@ -282,6 +283,46 @@ static void add_alarm_tool(cJSON *setup)
     cJSON_AddItemToArray(decls, decl);
 }
 
+static void add_ota_tool(cJSON *setup)
+{
+    if (!setup) return;
+    cJSON *tools = cJSON_GetObjectItem(setup, "tools");
+    if (!cJSON_IsArray(tools)) return;
+    cJSON *tool = NULL, *decls = NULL;
+    cJSON_ArrayForEach(tool, tools) {
+        decls = cJSON_GetObjectItem(tool, "functionDeclarations");
+        if (cJSON_IsArray(decls)) break;
+        decls = NULL;
+    }
+    if (!decls) return;
+    cJSON *decl = cJSON_CreateObject();
+    if (!decl) return;
+    cJSON_AddStringToObject(decl, "name", "update_firmware");
+    cJSON_AddStringToObject(decl, "behavior", "BLOCKING");
+    cJSON_AddStringToObject(decl, "description",
+        "Memeriksa atau memasang pembaruan program (firmware) robot ini lewat internet. Panggil HANYA jika pengguna jelas meminta cek update/pembaruan program robot (action=cek) atau jelas meminta memasang update (action=pasang). Untuk action=pasang, pengguna harus benar-benar memintanya; jika ragu, tanyakan dulu apakah dia yakin. Setelah tool menjawab, sampaikan hasilnya dengan singkat. Jika sedang memasang, robot akan restart sendiri; jangan mengaku sudah selesai.");
+    cJSON *params = cJSON_AddObjectToObject(decl, "parameters");
+    cJSON_AddStringToObject(params, "type", "OBJECT");
+    cJSON *props = cJSON_AddObjectToObject(params, "properties");
+    cJSON *action = cJSON_AddObjectToObject(props, "action");
+    cJSON_AddStringToObject(action, "type", "STRING");
+    cJSON_AddStringToObject(action, "description", "cek = hanya periksa versi baru; pasang = unduh dan pasang versi baru.");
+    cJSON *action_enum = cJSON_AddArrayToObject(action, "enum");
+    cJSON_AddItemToArray(action_enum, cJSON_CreateString("cek"));
+    cJSON_AddItemToArray(action_enum, cJSON_CreateString("pasang"));
+    cJSON *required = cJSON_AddArrayToObject(params, "required");
+    cJSON_AddItemToArray(required, cJSON_CreateString("action"));
+    cJSON_AddItemToArray(decls, decl);
+}
+
+static void ota_tool_done(void *ctx, const char *text)
+{
+    char *id = (char *)ctx;
+    if (!id) return;
+    (void)websocket_send_tool_response_text(id, "update_firmware", (text && text[0]) ? text : "Selesai.");
+    free(id);
+}
+
 static void add_radio_tool(cJSON *setup)
 {
     if (!setup) return;
@@ -388,6 +429,7 @@ bool build_gemini_setup(char **output, size_t *output_len)
     add_web_search_tool(setup);
     add_alarm_tool(setup);
     add_radio_tool(setup);
+    add_ota_tool(setup);
 
     cJSON *realtime = cJSON_AddObjectToObject(setup, "realtimeInputConfig");
     cJSON *aad = cJSON_AddObjectToObject(realtime, "automaticActivityDetection");
@@ -651,6 +693,17 @@ static void process_gemini_tool_call(cJSON *tool_call)
                 websocket_set_mic_uplink_paused(false);
                 (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
                     "Radio belum bisa dimulai karena memori atau task tidak tersedia. Coba lagi.");
+            }
+            continue;
+        } else if (strcmp(name->valuestring, "update_firmware") == 0) {
+            cJSON *action = cJSON_GetObjectItem(args, "action");
+            bool install = cJSON_IsString(action) && action->valuestring &&
+                           strcmp(action->valuestring, "pasang") == 0;
+            char *id_copy = strdup(id->valuestring);
+            if (!id_copy || !ota_update_run_async(install, ota_tool_done, id_copy)) {
+                free(id_copy);
+                (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
+                    "Update belum bisa dimulai karena sedang sibuk atau memori kurang. Coba lagi nanti.");
             }
             continue;
         } else if (strcmp(name->valuestring, "alarm_control") == 0) {
