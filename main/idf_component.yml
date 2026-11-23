@@ -7,5 +7,3 @@ dependencies:
     version: "2.4.5"
   espressif/led_strip:
     version: "~3.0.3"
-dependencies:
-  espressif/esp_audio_codec: "^2.6.2"
