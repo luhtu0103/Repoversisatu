@@ -13,6 +13,7 @@
 #include "speaker_id.h"
 #include "alarm.h"
 #include "radio_player.h"
+#include "ota_update.h"
 
 #include "esp_log.h"
 #include "esp_system.h"
@@ -977,6 +978,7 @@ extern "C" void app_main()
         if (speaker_id_init()) web_config_set_extra_handlers(speaker_id_web_register);
         else ESP_LOGW(TAG, "speaker_id gagal init; halaman Profil Suara tidak aktif");
         web_config_start();
+        ota_update_mark_valid();  // mode konfigurasi = robot hidup; jangan di-rollback
         while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
     led_boot_phase = false;
@@ -1012,5 +1014,10 @@ extern "C" void app_main()
     debug_network_path(); vTaskDelay(pdMS_TO_TICKS(1000)); face_set_state(FACE_SLEEP); display_status("Sistem siap. Katakan Hi, ESP...");
 
     BaseType_t task_result = xTaskCreate(audio_task, "audio_task", 10240, NULL, 5, NULL); if (task_result != pdPASS) ESP_LOGE(TAG, "Gagal membuat audio_task!"); else ESP_LOGI(TAG, "audio_task berhasil dimulai.");
+    // OTA: setelah hidup normal 20 detik, tandai program ini sehat (batalkan rollback),
+    // lalu cek diam-diam apakah ada versi baru di GitHub (hanya dicatat di log).
+    vTaskDelay(pdMS_TO_TICKS(20000));
+    ota_update_mark_valid();
+    (void)ota_update_run_async(false, NULL, NULL);
     while (1) vTaskDelay(pdMS_TO_TICKS(1000));
 }
