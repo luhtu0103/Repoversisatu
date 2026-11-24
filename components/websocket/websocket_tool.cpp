@@ -30,7 +30,6 @@ static bool supported_tool_name(const char *name)
         strcmp(name, "memory_save") == 0 ||
         strcmp(name, "memory_delete") == 0 ||
         strcmp(name, "memory_read") == 0 ||
-        strcmp(name, "web_search") == 0 ||
         strcmp(name, "alarm_control") == 0 ||
         strcmp(name, "putar_radio") == 0 ||
         strcmp(name, "update_firmware") == 0 ||
