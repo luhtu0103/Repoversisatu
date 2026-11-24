@@ -30,6 +30,11 @@
 
 void audio_hal_init(void);
 
+// Volume utama speaker, 10..120 persen (100 = normal). Berlaku untuk suara Gemini dan radio.
+// Disimpan permanen di NVS. set mengembalikan nilai yang dipakai (sudah dibatasi).
+int audio_hal_get_volume(void);
+int audio_hal_set_volume(int percent);
+
 // Read PCM frames captured by the dedicated I2S producer task.
 
 // Automatically disable microphone capture while speaker playback is active.
