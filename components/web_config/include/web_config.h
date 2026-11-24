@@ -35,6 +35,9 @@ bool web_config_api_key_is_valid(const char *api_key);
 // Set force_config = 1, lalu restart.
 void web_config_force_reset(void);
 
+// Set force_config = 0, lalu restart (keluar dari mode konfigurasi tanpa menyimpan).
+void web_config_exit_and_restart(void);
+
 // Daftarkan halaman tambahan (mis. /voice) ke HTTP server konfigurasi.
 // Panggil SEBELUM web_config_start(). httpd_handle = httpd_handle_t.
 typedef void (*web_config_extra_handlers_t)(void *httpd_handle);
