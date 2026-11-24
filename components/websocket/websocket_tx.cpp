@@ -117,7 +117,7 @@ bool websocket_send_touch_prompt(bool angry)
     return true;
 }
 
-bool websocket_send_alarm_prompt(int hour, int minute, const char *label)
+bool websocket_send_alarm_prompt(int hour, int minute, const char *label, int kind)
 {
     if (!label || !label[0] || hour < 0 || hour > 23 || minute < 0 || minute > 59) return false;
     if (!websocket_is_connected() || !websocket_tx_queue) return false;
@@ -132,18 +132,33 @@ bool websocket_send_alarm_prompt(int hour, int minute, const char *label)
         safe[j++] = (char)*p;
     }
     safe[j] = '\0';
-    char json[1024];
-    int n = snprintf(json, sizeof(json),
-        "{\"clientContent\":{\"turns\":[{\"role\":\"user\",\"parts\":[{\"text\":"
-        "\"[Alarm otomatis] Sekarang pukul %02d:%02d WITA. Keterangan alarm: %s. "
-        "Bangunkan pengguna sekarang. Ucapkan satu sapaan hangat dan alami dalam bahasa Indonesia, "
-        "sesuai keterangan alarm. Jangan membacakan instruksi dalam tanda kurung dan jangan bertanya. "
-        "Saat mengucapkan waktu, sebut jam dan menit secara alami dalam bahasa Indonesia, dengan pola "
-        "pukul [jam dalam kata] lewat [menit dalam kata] menit WITA. Untuk 20:40, ucapkan "
-        "pukul dua puluh lewat empat puluh menit WITA; jangan ucapkan dua puluh empat puluh atau 24:40. "
-        "Contoh jika untuk membangunkan: Selamat pagi! Sekarang sudah pukul %02d:%02d. Yuk bangun, "
-        "semangat menjalani aktivitas hari ini! Buat ucapan terasa alami dan tidak harus sama persis.\"}]}],\"turnComplete\":true}}",
-        hour, minute, safe, hour, minute);
+    char json[1536];
+    int n;
+    if (kind == 1) {
+        n = snprintf(json, sizeof(json),
+            "{\"clientContent\":{\"turns\":[{\"role\":\"user\",\"parts\":[{\"text\":"
+            "\"[Pengingat otomatis] Sekarang pukul %02d:%02d WITA. Pengguna meminta diingatkan tentang: %s. "
+            "Sampaikan pengingat itu sekarang dalam satu atau dua kalimat singkat, hangat, dan alami dalam bahasa Indonesia. "
+            "Jangan mengucapkan selamat pagi atau membangunkan pengguna kecuali keterangan memintanya. "
+            "Jangan membacakan instruksi dalam tanda kurung dan jangan bertanya. "
+            "Jika perlu menyebut waktu, ucapkan jam dan menit secara alami dalam bahasa Indonesia, dengan pola "
+            "pukul [jam dalam kata] lewat [menit dalam kata] menit WITA; jangan ucapkan angka seperti 24:40. "
+            "Contoh jika untuk minum obat: Hei, ini pengingatmu, sekarang waktunya minum obat. Jaga kesehatan ya! "
+            "Buat ucapan terasa alami dan tidak harus sama persis.\"}]}],\"turnComplete\":true}}",
+            hour, minute, safe);
+    } else {
+        n = snprintf(json, sizeof(json),
+            "{\"clientContent\":{\"turns\":[{\"role\":\"user\",\"parts\":[{\"text\":"
+            "\"[Alarm otomatis] Sekarang pukul %02d:%02d WITA. Keterangan alarm: %s. "
+            "Bangunkan pengguna sekarang. Ucapkan satu sapaan hangat dan alami dalam bahasa Indonesia, "
+            "sesuai keterangan alarm. Jangan membacakan instruksi dalam tanda kurung dan jangan bertanya. "
+            "Saat mengucapkan waktu, sebut jam dan menit secara alami dalam bahasa Indonesia, dengan pola "
+            "pukul [jam dalam kata] lewat [menit dalam kata] menit WITA. Untuk 20:40, ucapkan "
+            "pukul dua puluh lewat empat puluh menit WITA; jangan ucapkan dua puluh empat puluh atau 24:40. "
+            "Contoh jika untuk membangunkan: Selamat pagi! Sekarang sudah pukul %02d:%02d. Yuk bangun, "
+            "semangat menjalani aktivitas hari ini! Buat ucapan terasa alami dan tidak harus sama persis.\"}]}],\"turnComplete\":true}}",
+            hour, minute, safe, hour, minute);
+    }
     if (n <= 0 || (size_t)n >= sizeof(json)) return false;
     uint8_t *copy = (uint8_t *)malloc((size_t)n);
     if (!copy) return false;
@@ -159,7 +174,7 @@ bool websocket_send_alarm_prompt(int hour, int minute, const char *label)
         ESP_LOGW(TAG, "Alarm prompt ditahan: TX queue penuh");
         return false;
     }
-    ESP_LOGI(TAG, "Alarm prompt masuk antrean TX: %02d:%02d WITA (%s)", hour, minute, safe);
+    ESP_LOGI(TAG, "Alarm prompt masuk antrean TX: %02d:%02d WITA kind=%d (%s)", hour, minute, kind, safe);
     return true;
 }
 
