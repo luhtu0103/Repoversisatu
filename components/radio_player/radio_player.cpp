@@ -631,7 +631,10 @@ static void play_task(void *)
     esp_audio_simple_dec_handle_t aac_dec = nullptr;
     bool aac_registered = false;
     bool aac_core_registered = false;
-    uint8_t *in = (uint8_t *)heap_caps_malloc(INBUF, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    /* Penyangga masukan 24 KB ditaruh di PSRAM supaya RAM internal tidak habis (radio pernah gagal:
+     * "Memori tidak cukup untuk pemutar radio"). Jika PSRAM gagal, pakai RAM internal sebagai cadangan. */
+    uint8_t *in = (uint8_t *)heap_caps_malloc(INBUF, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!in) in = (uint8_t *)heap_caps_malloc(INBUF, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     int16_t *pcm = (int16_t *)heap_caps_malloc(MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(int16_t),
                                                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     int16_t *mono = (int16_t *)heap_caps_malloc(1152 * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
