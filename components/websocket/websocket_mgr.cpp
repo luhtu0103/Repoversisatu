@@ -105,8 +105,10 @@ static void websocket_cleanup_task(void *arg)
 {
     (void)arg;
     ESP_LOGI(TAG, "WebSocket lifecycle cleanup worker siap");
+    int64_t finish_wait_start_us = 0;
     for (;;) {
         esp_websocket_client_handle_t close_target = client;
+        if (!websocket_close_requested) finish_wait_start_us = 0;
         if (websocket_close_requested) {
             if (close_target == NULL) {
                 websocket_close_requested = false;
@@ -118,7 +120,20 @@ static void websocket_cleanup_task(void *arg)
                 } else {
                     ESP_LOGW(TAG, "Cleanup worker: close WebSocket akan dicoba lagi, err=0x%x", (unsigned)close_err);
                 }
+            } else if (websocket_cleanup_is_pending()) {
+                /* Task WebSocket sudah selesai sendiri (FINISH sudah datang). Memanggil stop() pada
+                 * client yang sudah selesai bisa menunggu selamanya dan membuat robot macet
+                 * (bug terlihat di log: setelah koneksi direset, robot tak mau merespons lagi). */
+                websocket_close_requested = false;
+                finish_wait_start_us = 0;
+                ESP_LOGI(TAG, "Cleanup worker: client sudah selesai sendiri; langsung dibersihkan");
+            } else if (finish_wait_start_us == 0 ||
+                       (esp_timer_get_time() - finish_wait_start_us) < 3000000LL) {
+                /* Tanpa auto-reconnect, task WebSocket berhenti sendiri dan mengirim FINISH.
+                 * Beri waktu 3 detik sebelum memaksa stop(). */
+                if (finish_wait_start_us == 0) finish_wait_start_us = esp_timer_get_time();
             } else {
+                finish_wait_start_us = 0;
                 /* A disconnected socket is not proof that the WebSocket task
                  * has exited. Stop it outside the event callback, then wait
                  * for WEBSOCKET_EVENT_FINISH before destroying the client. */
