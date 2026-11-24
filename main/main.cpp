@@ -777,11 +777,23 @@ static void audio_task(void *arg)
             portEXIT_CRITICAL(&speaker_context_mux);
             // Wait for the previous WebSocket client to be destroyed before
             // detecting another wake word and starting a fresh Gemini session.
+            static int64_t lifecycle_busy_since_us = 0;
             if (websocket_lifecycle_busy()) {
+                /* Pengaman: jika pembersihan koneksi macet > 30 detik, robot tidak akan pernah
+                 * mendengar wake word lagi. Restart supaya pulih sendiri. */
+                const int64_t busy_now_us = esp_timer_get_time();
+                if (lifecycle_busy_since_us == 0) {
+                    lifecycle_busy_since_us = busy_now_us;
+                } else if (busy_now_us - lifecycle_busy_since_us > 30 * 1000000LL) {
+                    ESP_LOGE(TAG, "Koneksi Gemini macet > 30 detik saat menunggu wake word; restart untuk pulih");
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    esp_restart();
+                }
                 buffer_pos = 0;
                 vTaskDelay(pdMS_TO_TICKS(10));
                 continue;
             }
+            lifecycle_busy_since_us = 0;
             int64_t now_debug_us = esp_timer_get_time();
             if (now_debug_us - last_activity_debug_us >= 1000000) {
                 last_activity_debug_us = now_debug_us;
