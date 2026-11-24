@@ -258,26 +258,48 @@ static void add_alarm_tool(cJSON *setup)
     cJSON_AddStringToObject(decl, "name", "alarm_control");
     cJSON_AddStringToObject(decl, "behavior", "BLOCKING");
     cJSON_AddStringToObject(decl, "description",
-        "Kelola alarm suara perangkat. Panggil HANYA saat pengguna secara eksplisit meminta memasang/menyetel/mengubah alarm, melihat alarm, atau membatalkan/menghapus alarm. Zona waktu selalu WITA (UTC+8). Untuk memasang alarm, tentukan jam 0-23, menit 0-59, dan label/keterangan singkat yang merangkum tujuan alarm, misalnya 'untuk membangunkan'. Jangan mengarang waktu atau keterangan; jika waktu tidak jelas, tanyakan dulu. Untuk melihat status gunakan action=status; untuk membatalkan gunakan action=cancel. Setelah tool memberi hasil, sampaikan konfirmasi suara berdasarkan hasil itu dan jangan mengaku berhasil jika gagal.");
+        "Kelola alarm bangun dan pengingat suara (maksimal 8 sekaligus). Panggil HANYA saat pengguna secara eksplisit meminta memasang alarm, meminta diingatkan sesuatu ('ingatkan aku ...'), melihat daftar alarm/pengingat, atau membatalkannya. Zona waktu selalu WITA (UTC+8). action=set memasang: kind=bangun untuk membangunkan, kind=pengingat untuk mengingatkan hal lain (minum obat, cek masakan, rapat). Tentukan waktu dengan salah satu cara: hour+minute (jam 0-23, menit 0-59) ATAU minutes_from_now untuk 'N menit lagi' (misal 15 menit lagi = 15; 1 jam 30 menit lagi = 90). repeat: sekali (bawaan), setiap_hari, atau hari_kerja (Senin sampai Jumat); pengulangan hanya untuk hour+minute. label berisi keterangan singkat apa yang diingatkan, misalnya 'minum obat'. Jangan mengarang waktu atau keterangan; jika waktu atau isi pengingat tidak jelas, tanyakan dulu. action=status membacakan semua alarm beserta nomornya. action=cancel membatalkan: isi id (nomor) untuk satu alarm, atau all=true untuk semua; jika pengguna hanya bilang 'batalkan alarm' dan ada lebih dari satu, tanyakan nomor mana atau apakah semuanya. Setelah tool memberi hasil, sampaikan konfirmasi suara berdasarkan hasil itu dan jangan mengaku berhasil jika gagal.");
     cJSON *params = cJSON_AddObjectToObject(decl, "parameters");
     cJSON_AddStringToObject(params, "type", "OBJECT");
     cJSON *props = cJSON_AddObjectToObject(params, "properties");
     cJSON *action = cJSON_AddObjectToObject(props, "action");
     cJSON_AddStringToObject(action, "type", "STRING");
-    cJSON_AddStringToObject(action, "description", "Aksi alarm: set, status, atau cancel.");
+    cJSON_AddStringToObject(action, "description", "Aksi: set, status, atau cancel.");
     cJSON *action_enum = cJSON_AddArrayToObject(action, "enum");
     cJSON_AddItemToArray(action_enum, cJSON_CreateString("set"));
     cJSON_AddItemToArray(action_enum, cJSON_CreateString("status"));
     cJSON_AddItemToArray(action_enum, cJSON_CreateString("cancel"));
     cJSON *hour = cJSON_AddObjectToObject(props, "hour");
     cJSON_AddStringToObject(hour, "type", "INTEGER");
-    cJSON_AddStringToObject(hour, "description", "Jam WITA format 24 jam, 0 sampai 23; wajib untuk action=set.");
+    cJSON_AddStringToObject(hour, "description", "Jam WITA format 24 jam, 0 sampai 23; untuk action=set jika memakai jam tertentu.");
     cJSON *minute = cJSON_AddObjectToObject(props, "minute");
     cJSON_AddStringToObject(minute, "type", "INTEGER");
-    cJSON_AddStringToObject(minute, "description", "Menit 0 sampai 59; wajib untuk action=set.");
+    cJSON_AddStringToObject(minute, "description", "Menit 0 sampai 59; untuk action=set jika memakai jam tertentu.");
+    cJSON *rel = cJSON_AddObjectToObject(props, "minutes_from_now");
+    cJSON_AddStringToObject(rel, "type", "INTEGER");
+    cJSON_AddStringToObject(rel, "description", "Berapa menit lagi dari sekarang (1 sampai 1440), untuk 'ingatkan 15 menit lagi'. Jika diisi, hour dan minute tidak dipakai.");
     cJSON *label = cJSON_AddObjectToObject(props, "label");
     cJSON_AddStringToObject(label, "type", "STRING");
-    cJSON_AddStringToObject(label, "description", "Keterangan tujuan alarm, misalnya 'Alarm untuk membangunkan'. Wajib untuk action=set.");
+    cJSON_AddStringToObject(label, "description", "Keterangan singkat apa yang diingatkan atau tujuan alarm, misalnya 'minum obat' atau 'untuk membangunkan'. Wajib untuk action=set.");
+    cJSON *kind = cJSON_AddObjectToObject(props, "kind");
+    cJSON_AddStringToObject(kind, "type", "STRING");
+    cJSON_AddStringToObject(kind, "description", "bangun = membangunkan pengguna; pengingat = mengingatkan hal lain.");
+    cJSON *kind_enum = cJSON_AddArrayToObject(kind, "enum");
+    cJSON_AddItemToArray(kind_enum, cJSON_CreateString("bangun"));
+    cJSON_AddItemToArray(kind_enum, cJSON_CreateString("pengingat"));
+    cJSON *repeat = cJSON_AddObjectToObject(props, "repeat");
+    cJSON_AddStringToObject(repeat, "type", "STRING");
+    cJSON_AddStringToObject(repeat, "description", "sekali, setiap_hari, atau hari_kerja. Bawaan sekali.");
+    cJSON *repeat_enum = cJSON_AddArrayToObject(repeat, "enum");
+    cJSON_AddItemToArray(repeat_enum, cJSON_CreateString("sekali"));
+    cJSON_AddItemToArray(repeat_enum, cJSON_CreateString("setiap_hari"));
+    cJSON_AddItemToArray(repeat_enum, cJSON_CreateString("hari_kerja"));
+    cJSON *idp = cJSON_AddObjectToObject(props, "id");
+    cJSON_AddStringToObject(idp, "type", "INTEGER");
+    cJSON_AddStringToObject(idp, "description", "Nomor alarm yang dibatalkan (1 sampai 8), untuk action=cancel.");
+    cJSON *allp = cJSON_AddObjectToObject(props, "all");
+    cJSON_AddStringToObject(allp, "type", "BOOLEAN");
+    cJSON_AddStringToObject(allp, "description", "true untuk membatalkan semua alarm dan pengingat (action=cancel).");
     cJSON *required = cJSON_AddArrayToObject(params, "required");
     cJSON_AddItemToArray(required, cJSON_CreateString("action"));
     cJSON_AddItemToArray(decls, decl);
@@ -416,7 +438,7 @@ bool build_gemini_setup(char **output, size_t *output_len)
     cJSON *system_parts = cJSON_AddArrayToObject(system_instruction, "parts");
     cJSON *system_text = cJSON_CreateObject();
     cJSON_AddStringToObject(system_text, "text",
-            "Kamu adalah asisten suara berbahasa Indonesia. Nama panggilan perangkat ini adalah ESP (dibaca e-es-pe, bukan ISP). Jika pengguna menyapa dengan 'halo ESP', 'hai ESP', 'halo ISP', atau yang mirip, itu sapaan kepadamu. Jika audio terdengar seperti ucapan yang agak keliru atau tidak masuk akal, gunakan konteks percakapan dan perintah perangkat yang umum untuk menafsirkan maksud paling mungkin; terutama koreksi salah dengar yang masuk akal seperti 'ikan kipas' menjadi 'hidupkan kipas' hanya bila konteks mendukung. Jika maksud perintah alat masih tidak cukup jelas, tanyakan klarifikasi dan jangan jalankan aksi yang berisiko. Jika yang terdengar hanya gumaman, nyanyian, suara TV, musik, atau percakapan orang lain yang tidak ditujukan kepada robot, jangan memulai percakapan atau menjalankan tool; diam, atau jawab sangat singkat hanya jika perlu. Jangan menganggap setiap suara latar sebagai perintah pengguna. Untuk alarm, patuhi zona waktu WITA (UTC+8). Jika pengguna secara eksplisit meminta memasang, mengubah, melihat, atau membatalkan alarm, gunakan tool alarm_control dan jangan hanya menjanjikan tindakan. Jika waktu atau tujuan alarm tidak jelas, tanyakan klarifikasi sebelum memanggil tool. Alarm yang tiba akan memulai sesi Gemini otomatis; ucapkan sapaan pembangun yang alami sesuai keterangan alarm, tanpa nada alarm. " 
+            "Kamu adalah asisten suara berbahasa Indonesia. Nama panggilan perangkat ini adalah ESP (dibaca e-es-pe, bukan ISP). Jika pengguna menyapa dengan 'halo ESP', 'hai ESP', 'halo ISP', atau yang mirip, itu sapaan kepadamu. Jika audio terdengar seperti ucapan yang agak keliru atau tidak masuk akal, gunakan konteks percakapan dan perintah perangkat yang umum untuk menafsirkan maksud paling mungkin; terutama koreksi salah dengar yang masuk akal seperti 'ikan kipas' menjadi 'hidupkan kipas' hanya bila konteks mendukung. Jika maksud perintah alat masih tidak cukup jelas, tanyakan klarifikasi dan jangan jalankan aksi yang berisiko. Jika yang terdengar hanya gumaman, nyanyian, suara TV, musik, atau percakapan orang lain yang tidak ditujukan kepada robot, jangan memulai percakapan atau menjalankan tool; diam, atau jawab sangat singkat hanya jika perlu. Jangan menganggap setiap suara latar sebagai perintah pengguna. Untuk alarm, patuhi zona waktu WITA (UTC+8). Jika pengguna secara eksplisit meminta memasang, mengubah, melihat, atau membatalkan alarm atau pengingat (misalnya ingatkan aku jam delapan minum obat, atau ingatkan 15 menit lagi), gunakan tool alarm_control dan jangan hanya menjanjikan tindakan. Untuk membangunkan pakai kind bangun; untuk mengingatkan hal lain pakai kind pengingat. Jika waktu atau tujuan alarm tidak jelas, tanyakan klarifikasi sebelum memanggil tool. Alarm atau pengingat yang tiba akan memulai sesi Gemini otomatis; ucapkan sapaan yang alami sesuai jenis dan keterangannya, tanpa nada alarm. " 
     "Dalam sesi percakapan Gemini Live yang sedang aktif, gunakan konteks percakapan sebelumnya pada sesi yang sama untuk memahami rujukan dan pertanyaan lanjutan; jangan memperlakukan setiap turn sebagai percakapan baru. " 
     "Konteks sesi hanya berlaku untuk sesi aktif. Ketika perangkat memulai sesi baru tanpa session-resumption handle, perlakukan percakapan sebagai baru dan jangan menganggap kamu mengingat sesi sebelumnya. "
     "Jika pengguna meminta aksi pada perangkat, gunakan fungsi control_device dengan command tombol yang tepat. "
@@ -780,46 +802,69 @@ static void process_gemini_tool_call(cJSON *tool_call)
                 (void)websocket_send_tool_response_text(id->valuestring, name->valuestring, "Gagal: aksi alarm tidak valid.");
                 continue;
             }
-            char detail[256] = {};
+            static char detail[900];   /* static: tidak membebani stack task WebSocket */
+            detail[0] = '\0';
+            static const char *const wakeup_terms[] = {
+                "membangunkan", "bangunkan", "bangun pagi", "waktu bangun", "bangun"
+            };
             if (strcmp(action->valuestring, "set") == 0) {
                 cJSON *hour = cJSON_GetObjectItem(args, "hour");
                 cJSON *minute = cJSON_GetObjectItem(args, "minute");
+                cJSON *rel = cJSON_GetObjectItem(args, "minutes_from_now");
                 cJSON *label = cJSON_GetObjectItem(args, "label");
-                if (!cJSON_IsNumber(hour) || !cJSON_IsNumber(minute) ||
+                cJSON *kind_j = cJSON_GetObjectItem(args, "kind");
+                cJSON *repeat_j = cJSON_GetObjectItem(args, "repeat");
+                const bool relative = cJSON_IsNumber(rel) && rel->valueint > 0;
+                if ((!relative && (!cJSON_IsNumber(hour) || !cJSON_IsNumber(minute))) ||
                     !cJSON_IsString(label) || !label->valuestring || !label->valuestring[0]) {
                     (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
-                        "Gagal: jam, menit, dan keterangan alarm harus lengkap.");
+                        "Gagal: waktu (jam dan menit, atau berapa menit lagi) dan keterangan harus lengkap.");
                     continue;
                 }
                 const char *effective_label = label->valuestring;
-                /* Gemini occasionally collapses a spoken purpose to the generic
-                 * label "Alarm". Recover an explicit wake-up purpose from the
-                 * user's actual transcript instead of losing it in NVS. */
+                int kind = -1;
+                if (cJSON_IsString(kind_j) && kind_j->valuestring) {
+                    if (strcmp(kind_j->valuestring, "bangun") == 0) kind = ALARM_KIND_WAKE;
+                    else if (strcmp(kind_j->valuestring, "pengingat") == 0) kind = ALARM_KIND_REMINDER;
+                }
+                /* Gemini kadang meringkas tujuan menjadi label generik "Alarm". Pulihkan
+                 * tujuan membangunkan dari transkrip asli pengguna. */
                 if (strcmp(effective_label, "Alarm") == 0 ||
                     strcmp(effective_label, "alarm") == 0 ||
                     strcmp(effective_label, "pengingat") == 0) {
-                    static const char *const wakeup_terms[] = {
-                        "membangunkan", "bangunkan", "bangun pagi", "waktu bangun"
-                    };
                     if (transcript_has_any(latest_user_transcript, wakeup_terms,
                             sizeof(wakeup_terms) / sizeof(wakeup_terms[0]))) {
                         effective_label = "untuk membangunkan";
+                        kind = ALARM_KIND_WAKE;
                         ESP_LOGW(TAG, "ALARM: label generik diperbaiki dari transkrip menjadi '%s'",
                                  effective_label);
                     }
                 }
-                success = alarm_set(hour->valueint, minute->valueint, effective_label, detail, sizeof(detail));
-            } else if (strcmp(action->valuestring, "cancel") == 0) {
-                success = alarm_cancel(detail, sizeof(detail));
-            } else if (strcmp(action->valuestring, "status") == 0) {
-                alarm_info_t info = {};
-                (void)alarm_get(&info);
-                if (info.active) {
-                    snprintf(detail, sizeof(detail), "Alarm aktif pukul %02d:%02d WITA. Keterangan: %s.",
-                             info.hour, info.minute, info.label);
-                } else {
-                    snprintf(detail, sizeof(detail), "Saat ini tidak ada alarm aktif.");
+                if (kind < 0)
+                    kind = transcript_has_any(effective_label, wakeup_terms,
+                               sizeof(wakeup_terms) / sizeof(wakeup_terms[0]))
+                           ? ALARM_KIND_WAKE : ALARM_KIND_REMINDER;
+                int repeat = ALARM_REPEAT_ONCE;
+                if (cJSON_IsString(repeat_j) && repeat_j->valuestring) {
+                    if (strcmp(repeat_j->valuestring, "setiap_hari") == 0) repeat = ALARM_REPEAT_DAILY;
+                    else if (strcmp(repeat_j->valuestring, "hari_kerja") == 0) repeat = ALARM_REPEAT_WEEKDAYS;
                 }
+                success = alarm_add(relative ? 0 : hour->valueint, relative ? 0 : minute->valueint,
+                                    relative ? rel->valueint : 0, kind, repeat,
+                                    effective_label, detail, sizeof(detail));
+            } else if (strcmp(action->valuestring, "cancel") == 0) {
+                cJSON *id_j = cJSON_GetObjectItem(args, "id");
+                cJSON *all_j = cJSON_GetObjectItem(args, "all");
+                if (cJSON_IsTrue(all_j)) {
+                    success = alarm_cancel_all(detail, sizeof(detail));
+                } else if (cJSON_IsNumber(id_j)) {
+                    success = alarm_cancel_id(id_j->valueint, detail, sizeof(detail));
+                } else {
+                    snprintf(detail, sizeof(detail),
+                             "Gagal: sebutkan nomor alarm yang dibatalkan, atau minta batalkan semua.");
+                }
+            } else if (strcmp(action->valuestring, "status") == 0) {
+                (void)alarm_describe_all(detail, sizeof(detail));
                 success = true;
             } else {
                 snprintf(detail, sizeof(detail), "Gagal: aksi alarm tidak dikenal.");
