@@ -283,6 +283,43 @@ static void add_alarm_tool(cJSON *setup)
     cJSON_AddItemToArray(decls, decl);
 }
 
+static void add_volume_tool(cJSON *setup)
+{
+    if (!setup) return;
+    cJSON *tools = cJSON_GetObjectItem(setup, "tools");
+    if (!cJSON_IsArray(tools)) return;
+    cJSON *tool = NULL, *decls = NULL;
+    cJSON_ArrayForEach(tool, tools) {
+        decls = cJSON_GetObjectItem(tool, "functionDeclarations");
+        if (cJSON_IsArray(decls)) break;
+        decls = NULL;
+    }
+    if (!decls) return;
+    cJSON *decl = cJSON_CreateObject();
+    if (!decl) return;
+    cJSON_AddStringToObject(decl, "name", "atur_volume");
+    cJSON_AddStringToObject(decl, "behavior", "BLOCKING");
+    cJSON_AddStringToObject(decl, "description",
+        "Mengatur volume speaker robot (suara Gemini dan radio). Panggil HANYA saat pengguna meminta volume diubah atau ditanya, misalnya 'keraskan suaramu', 'pelankan', 'volume 50', 'suaranya terlalu keras', atau 'berapa volume sekarang'. action=naik atau turun mengubah satu tingkat (10 poin). action=set memakai level persen (10 sampai 120, 100 = normal). action=cek hanya melaporkan volume. Setelah tool menjawab, sampaikan hasilnya dengan SATU kalimat singkat; jangan mengaku berhasil jika gagal.");
+    cJSON *params = cJSON_AddObjectToObject(decl, "parameters");
+    cJSON_AddStringToObject(params, "type", "OBJECT");
+    cJSON *props = cJSON_AddObjectToObject(params, "properties");
+    cJSON *action = cJSON_AddObjectToObject(props, "action");
+    cJSON_AddStringToObject(action, "type", "STRING");
+    cJSON_AddStringToObject(action, "description", "naik, turun, set, atau cek.");
+    cJSON *action_enum = cJSON_AddArrayToObject(action, "enum");
+    cJSON_AddItemToArray(action_enum, cJSON_CreateString("naik"));
+    cJSON_AddItemToArray(action_enum, cJSON_CreateString("turun"));
+    cJSON_AddItemToArray(action_enum, cJSON_CreateString("set"));
+    cJSON_AddItemToArray(action_enum, cJSON_CreateString("cek"));
+    cJSON *level = cJSON_AddObjectToObject(props, "level");
+    cJSON_AddStringToObject(level, "type", "INTEGER");
+    cJSON_AddStringToObject(level, "description", "Persen volume 10 sampai 120 (100 = normal); wajib untuk action=set.");
+    cJSON *required = cJSON_AddArrayToObject(params, "required");
+    cJSON_AddItemToArray(required, cJSON_CreateString("action"));
+    cJSON_AddItemToArray(decls, decl);
+}
+
 static void add_ota_tool(cJSON *setup)
 {
     if (!setup) return;
@@ -430,6 +467,7 @@ bool build_gemini_setup(char **output, size_t *output_len)
     add_alarm_tool(setup);
     add_radio_tool(setup);
     add_ota_tool(setup);
+    add_volume_tool(setup);
 
     cJSON *realtime = cJSON_AddObjectToObject(setup, "realtimeInputConfig");
     cJSON *aad = cJSON_AddObjectToObject(realtime, "automaticActivityDetection");
@@ -694,6 +732,36 @@ static void process_gemini_tool_call(cJSON *tool_call)
                 (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
                     "Radio belum bisa dimulai karena memori atau task tidak tersedia. Coba lagi.");
             }
+            continue;
+        } else if (strcmp(name->valuestring, "atur_volume") == 0) {
+            cJSON *action = cJSON_GetObjectItem(args, "action");
+            cJSON *level = cJSON_GetObjectItem(args, "level");
+            const char *act = (cJSON_IsString(action) && action->valuestring) ? action->valuestring : "";
+            const int before = audio_hal_get_volume();
+            char detail[160] = {};
+            if (strcmp(act, "cek") == 0) {
+                snprintf(detail, sizeof(detail), "Volume sekarang %d persen (100 = normal, batas 10 sampai 120).", before);
+            } else {
+                int target = before;
+                bool valid = true;
+                if (strcmp(act, "naik") == 0) target = before + 10;
+                else if (strcmp(act, "turun") == 0) target = before - 10;
+                else if (strcmp(act, "set") == 0 && cJSON_IsNumber(level)) target = level->valueint;
+                else valid = false;
+                if (!valid) {
+                    snprintf(detail, sizeof(detail), "Gagal: aksi volume tidak valid atau level belum disebut.");
+                } else {
+                    const int now_vol = audio_hal_set_volume(target);
+                    if (now_vol == before && (target > before || target < before)) {
+                        snprintf(detail, sizeof(detail), "Volume sudah di batas %s, tetap %d persen.",
+                                 target > before ? "paling keras" : "paling pelan", now_vol);
+                    } else {
+                        snprintf(detail, sizeof(detail), "Volume diubah dari %d ke %d persen.", before, now_vol);
+                    }
+                }
+            }
+            ESP_LOGI(TAG, "VOLUME TOOL action=%s -> %s", act, detail);
+            (void)websocket_send_tool_response_text(id->valuestring, name->valuestring, detail);
             continue;
         } else if (strcmp(name->valuestring, "update_firmware") == 0) {
             cJSON *action = cJSON_GetObjectItem(args, "action");
