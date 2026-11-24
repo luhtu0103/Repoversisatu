@@ -18,7 +18,8 @@ void websocket_app_start(void);
 bool websocket_send_audio_data(const uint8_t *data, size_t len);
 bool websocket_is_connected(void);
 bool websocket_send_touch_prompt(bool angry);
-bool websocket_send_alarm_prompt(int hour, int minute, const char *label);
+// kind: 0 = alarm bangun, 1 = pengingat biasa (lihat alarm.h).
+bool websocket_send_alarm_prompt(int hour, int minute, const char *label, int kind);
 
 // Beri tahu Gemini siapa yang bicara (hasil pengenal suara) agar ia menyapa dengan nama.
 // Dipanggil hanya untuk suara yang DIKENAL. Suara tidak dikenal: jangan panggil (tidak disapa).
