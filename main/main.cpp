@@ -427,6 +427,54 @@ static void utterance_feed(const int16_t *s, size_t n, bool voice)
     }
 }
 
+/* Tombol BOOT (GPIO0) ditekan 3x cepat: buka / tutup mode konfigurasi web.
+ * Dipanggil tiap ~10 ms. Mengembalikan true sekali saat tekan ke-3 selesai.
+ * Tiap tekan harus 30 ms - 1 detik; jeda antar tekan maksimal 1,5 detik. */
+static bool boot_triple_press_poll(void)
+{
+    static bool was_down = false;
+    static int64_t down_us = 0;
+    static int64_t last_release_us = 0;
+    static int count = 0;
+    const int64_t now = esp_timer_get_time();
+    const bool down = gpio_get_level(BOOT_BUTTON_GPIO) == 0;
+    if (down && !was_down) {
+        was_down = true;
+        down_us = now;
+    } else if (!down && was_down) {
+        was_down = false;
+        const int64_t held = now - down_us;
+        if (held >= 30000 && held <= 1000000) {
+            if (count > 0 && now - last_release_us > 1500000) count = 0;
+            count++;
+            last_release_us = now;
+            ESP_LOGI(TAG, "Tombol BOOT: tekan ke-%d dari 3", count);
+            if (count >= 3) {
+                count = 0;
+                return true;
+            }
+        } else {
+            count = 0;   // ditahan terlalu lama / terlalu singkat
+        }
+    }
+    if (!down && count > 0 && now - last_release_us > 1500000) count = 0;
+    return false;
+}
+
+static void boot_button_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        if (boot_triple_press_poll()) {
+            ESP_LOGW(TAG, "Tombol BOOT 3x -> masuk Config Mode (web config)");
+            display_status("Masuk Config Mode");
+            vTaskDelay(pdMS_TO_TICKS(800));
+            web_config_force_reset();
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
 static void led_status_task(void *arg)
 {
     (void)arg;
@@ -979,7 +1027,16 @@ extern "C" void app_main()
         else ESP_LOGW(TAG, "speaker_id gagal init; halaman Profil Suara tidak aktif");
         web_config_start();
         ota_update_mark_valid();  // mode konfigurasi = robot hidup; jangan di-rollback
-        while (1) vTaskDelay(pdMS_TO_TICKS(1000));
+        // Di mode konfigurasi: tekan BOOT 3x lagi = keluar dan boot normal (tanpa menyimpan).
+        while (1) {
+            if (boot_triple_press_poll()) {
+                ESP_LOGW(TAG, "Tombol BOOT 3x -> keluar Config Mode, boot normal");
+                display_status("Keluar Config Mode");
+                vTaskDelay(pdMS_TO_TICKS(800));
+                web_config_exit_and_restart();
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
     }
     led_boot_phase = false;
 
@@ -997,6 +1054,7 @@ extern "C" void app_main()
     audio_hal_afe_init();
     // Memory storage was initialized before OLED/audio tasks above.
     gpio_set_direction(BOOT_BUTTON_GPIO, GPIO_MODE_INPUT); gpio_set_pull_mode(BOOT_BUTTON_GPIO, GPIO_PULLUP_ONLY); ESP_LOGI(TAG, "Tombol boot siap di GPIO0");
+    if (xTaskCreate(boot_button_task, "boot_btn", 3072, NULL, 3, NULL) != pdPASS) ESP_LOGW(TAG, "boot_button_task gagal dibuat; tekan 3x tidak aktif");
     uart_control_init();
     if (!touch_emotion_start()) ESP_LOGE(TAG, "Sensor sentuh gagal dimulai; fitur sentuh dinonaktifkan");
 
