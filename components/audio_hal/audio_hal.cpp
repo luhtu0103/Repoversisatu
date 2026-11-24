@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "nvs.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -234,8 +235,49 @@ static void log_audio_heap(const char *stage)
     size_t psram_largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     ESP_LOGI(TAG, "HEAP[%s]: internal_free=%u internal_largest=%u psram_free=%u psram_largest=%u", stage, (unsigned)internal_free, (unsigned)internal_largest, (unsigned)psram_free, (unsigned)psram_largest);
 }
+/* ---- Volume utama speaker (Gemini + radio lewat audio_write_speaker) ----
+ * 100 = kekerasan seperti sebelumnya. Boleh 10..120. Disimpan di NVS. */
+#define VOLUME_MIN_PERCENT 10
+#define VOLUME_MAX_PERCENT 120
+#define VOLUME_NVS_NS "audio"
+#define VOLUME_NVS_KEY "vol"
+static volatile int s_volume_percent = 100;
+
+static void volume_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(VOLUME_NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+    uint8_t v = 0;
+    if (nvs_get_u8(h, VOLUME_NVS_KEY, &v) == ESP_OK &&
+        v >= VOLUME_MIN_PERCENT && v <= VOLUME_MAX_PERCENT) {
+        s_volume_percent = v;
+    }
+    nvs_close(h);
+}
+
+int audio_hal_get_volume(void)
+{
+    return s_volume_percent;
+}
+
+int audio_hal_set_volume(int percent)
+{
+    if (percent < VOLUME_MIN_PERCENT) percent = VOLUME_MIN_PERCENT;
+    if (percent > VOLUME_MAX_PERCENT) percent = VOLUME_MAX_PERCENT;
+    s_volume_percent = percent;
+    nvs_handle_t h;
+    if (nvs_open(VOLUME_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, VOLUME_NVS_KEY, (uint8_t)percent);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    ESP_LOGI(TAG, "Volume speaker: %d%%", percent);
+    return percent;
+}
+
 void audio_hal_init(void)
 {
+    volume_load();
     ESP_LOGI(TAG, "Menginisialisasi Audio I2S - proven v6.1.5 / Xiaozhi-compatible...");
     i2s_chan_config_t tx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     tx_chan_cfg.dma_desc_num = 6; tx_chan_cfg.dma_frame_num = 240; tx_chan_cfg.auto_clear = true;
@@ -372,8 +414,16 @@ size_t audio_write_speaker(const uint8_t *src, size_t len)
         const size_t old_offset = offset;
         size_t n = total - offset;
         if (n > I2S_WRITE_SAMPLES) n = I2S_WRITE_SAMPLES;
-        for (size_t i = 0; i < n; ++i)
-            tx_buffer[i] = static_cast<int32_t>(pcm[old_offset + i]) << 16;
+        const int32_t vol = s_volume_percent;
+        for (size_t i = 0; i < n; ++i) {
+            int32_t s = static_cast<int32_t>(pcm[old_offset + i]);
+            if (vol != 100) {
+                s = (s * vol) / 100;
+                if (s > 32767) s = 32767;
+                else if (s < -32768) s = -32768;
+            }
+            tx_buffer[i] = s << 16;
+        }
 
         size_t written = 0;
         esp_err_t err = i2s_channel_write(tx_handle, tx_buffer, n * sizeof(int32_t),
