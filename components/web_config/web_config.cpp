@@ -472,4 +472,10 @@ void web_config_force_reset(void)
     esp_restart();
 }
 
+void web_config_exit_and_restart(void)
+{
+    nvs_set_str_safe(KEY_FORCE_CONFIG, "0");
+    esp_restart();
+}
+
 } // extern "C"
