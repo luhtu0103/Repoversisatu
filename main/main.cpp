@@ -217,6 +217,7 @@ static volatile bool mic_voice_detected = false;
 static int64_t disconnect_wait_start_us = 0;
 static bool alarm_prompt_pending = false;
 static alarm_info_t alarm_prompt_info = {};
+static bool alarm_prompt_standby_after = true;   // kembali standby setelah alarm bicara (kecuali sedang ngobrol)
 
 /* Setelah radio streaming selesai, Gemini diberi tahu bahwa tadi baru memutar radio. */
 static char radio_note_name[48] = {};
@@ -577,13 +578,16 @@ static void audio_task(void *arg)
     constexpr int64_t STANDBY_PLAYBACK_DRAIN_TIMEOUT_US = 60000000LL;
 
     while (1) {
-        if (alarm_poll_due_internal()) {
+        /* Satu alarm per kali: jangan memicu alarm berikutnya sebelum prompt sebelumnya terkirim. */
+        if (!alarm_prompt_pending && alarm_poll_due_internal()) {
             alarm_info_t fired = {};
             if (alarm_take_due(&fired)) {
                 if (radio_is_active()) radio_stop();   // alarm lebih penting daripada radio
                 alarm_prompt_info = fired;
+                alarm_prompt_standby_after = !assistant_active;   // sedang ngobrol: jangan putuskan sesi setelah pengingat
                 alarm_prompt_pending = true;
-                ESP_LOGW(TAG, "ALARM: waktu %02d:%02d WITA tiba; memulai Gemini otomatis. Keterangan=%s",
+                ESP_LOGW(TAG, "ALARM #%d (%s): waktu %02d:%02d WITA tiba; memulai Gemini otomatis. Keterangan=%s",
+                         fired.id, fired.kind == ALARM_KIND_WAKE ? "bangun" : "pengingat",
                          fired.hour, fired.minute, fired.label);
                 display_status("Alarm: memulai Gemini");
                 if (!assistant_active && !websocket_lifecycle_busy()) {
@@ -919,11 +923,15 @@ static void audio_task(void *arg)
             radio_note_pending = false;
         if (alarm_prompt_pending && websocket_is_connected()) {
             if (websocket_send_alarm_prompt(alarm_prompt_info.hour, alarm_prompt_info.minute,
-                                            alarm_prompt_info.label)) {
+                                            alarm_prompt_info.label, alarm_prompt_info.kind)) {
                 alarm_prompt_pending = false;
-                standby_pending = true;  // kembali ke standby setelah ucapan alarm selesai diputar
-                standby_requested_us = esp_timer_get_time();
-                ESP_LOGI(TAG, "Prompt alarm terkirim ke Gemini; menunggu audio selesai lalu kembali standby");
+                if (alarm_prompt_standby_after) {
+                    standby_pending = true;  // kembali ke standby setelah ucapan alarm selesai diputar
+                    standby_requested_us = esp_timer_get_time();
+                    ESP_LOGI(TAG, "Prompt alarm terkirim ke Gemini; menunggu audio selesai lalu kembali standby");
+                } else {
+                    ESP_LOGI(TAG, "Prompt pengingat terkirim ke Gemini; sesi obrolan tetap berjalan");
+                }
             }
         }
 
