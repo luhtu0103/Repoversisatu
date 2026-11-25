@@ -32,6 +32,7 @@ idf_component_register(
         alarm
         radio_player
         ota_update
+        habit
 )
 
 target_link_libraries(${COMPONENT_LIB} INTERFACE
