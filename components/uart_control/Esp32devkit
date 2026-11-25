@@ -868,6 +868,7 @@ static int robotSampleCount = 0, robotSampleNext = 0;
 static char robotVer[24] = "";
 static uint32_t robotUptime = 0, robotRam = 0, robotRamMin = 0, robotPsram = 0, robotDrops = 0;
 static int robotRssi = 0, robotChan = 0, robotWs = 0;
+static long robotMicPeak = -1, robotMicClip = -1;   // -1 = robot belum melaporkan
 static uint32_t robotLastMs = 0;     // millis() saat laporan terakhir masuk
 static bool robotEverReported = false;
 
@@ -920,6 +921,7 @@ bool robotTerimaLaporan(const String& cmd) {
     robotUptime = strtoul(f[2], nullptr, 10); robotRssi = atoi(f[3]); robotChan = atoi(f[4]);
     robotRam = strtoul(f[5], nullptr, 10); robotRamMin = strtoul(f[6], nullptr, 10); robotPsram = strtoul(f[7], nullptr, 10);
     robotWs = atoi(f[8]); robotDrops = strtoul(f[9], nullptr, 10);
+    robotMicPeak = (n >= 12) ? atol(f[10]) : -1; robotMicClip = (n >= 12) ? atol(f[11]) : -1;
     robotLastMs = millis(); robotEverReported = true;
     robotSamples[robotSampleNext].ts = (uint32_t)time(nullptr);
     robotSamples[robotSampleNext].rssi = (int8_t)constrain(robotRssi, -127, 0);
@@ -1030,6 +1032,16 @@ void handleRobot() {
     h += String("<div class='row'><span>Memori cepat (bebas)</span><span>") + String(robotRam / 1024) + " KB</span></div>";
     h += String("<div class='row'><span>Memori cepat (terendah)</span><span class='") + mc + "'>" + String(robotRamMin / 1024) + " KB</span></div>";
     h += String("<div class='row'><span>Memori besar (PSRAM)</span><span>") + String(robotPsram / 1024) + " KB</span></div>";
+    if (robotMicPeak >= 0) {
+      if (robotMicPeak == 0) {
+        h += "<div class='row'><span>Suara mic (1 menit)</span><span class='small'>tidak ada percakapan</span></div>";
+      } else {
+        long pct = robotMicPeak * 100L / 32767L;
+        const char* mcc = robotMicClip > 30 ? "bad" : (robotMicClip > 5 ? "mid" : "ok");
+        const char* nilai = robotMicClip > 30 ? "terlalu keras / pecah" : (robotMicClip > 5 ? "agak keras" : (pct < 12 ? "pelan" : "normal"));
+        h += String("<div class='row'><span>Suara mic (1 menit)</span><span class='") + mcc + "'>puncak " + String(pct) + "%, pecah " + String(robotMicClip) + " kali (" + nilai + ")</span></div>";
+      }
+    }
     h += "</div>";
   }
   server.sendContent(h); h = "";
