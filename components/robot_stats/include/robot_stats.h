@@ -1,5 +1,7 @@
 #pragma once
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -18,6 +20,10 @@ void robot_stats_note_ws_drop(const char *src, int code);
 
 /* Simpan kode penutupan dari server Gemini (mis. 1008, 1011) untuk ikut dilaporkan saat putus. */
 void robot_stats_note_close_code(int code);
+
+/* Ukur suara mic yang dikirim ke Gemini (puncak dan jumlah sampel pecah/clipping).
+ * Dipanggil dari audio_task tiap potongan suara saat percakapan. Murah: satu loop pendek. */
+void robot_stats_mic_feed(const int16_t *samples, size_t count);
 
 /* Kirim kejadian bebas, mis. "restart_macet". Hanya huruf, angka, garis bawah. */
 void robot_stats_event(const char *kind);
