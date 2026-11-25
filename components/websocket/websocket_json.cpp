@@ -592,6 +592,16 @@ bool build_gemini_setup(char **output, size_t *output_len)
             cJSON_AddItemToArray(system_parts, habit_part);
         }
     }
+    /* Catatan rilis: daftar kemampuan robot + pengumuman sekali setelah pembaruan. */
+    static EXT_RAM_BSS_ATTR char release_context[1536];
+    size_t release_len = habit_build_release_context(release_context, sizeof(release_context));
+    if (release_len > 0) {
+        cJSON *release_part = cJSON_CreateObject();
+        if (release_part) {
+            cJSON_AddStringToObject(release_part, "text", release_context);
+            cJSON_AddItemToArray(system_parts, release_part);
+        }
+    }
     /* 2 KiB role buffer: 2047 bytes of text plus the terminating NUL. */
     static char role_text[2048];
 
@@ -1261,6 +1271,7 @@ void process_gemini_message(const char *json, size_t len)
                 history_assistant_turn[0] = '\0';
             }
             history_last_user_sent[0] = '\0';
+            habit_release_mark_announced();   /* pengumuman pembaruan sudah terucap; jangan diulang */
             /* Do not carry memory authorization into a later user turn. */
             pending_explicit_memory_save = false;
             pending_explicit_memory_delete = false;
