@@ -15,6 +15,12 @@ void uart_control_send_history(const char *role, const char *text);
 void uart_control_send_web_search(const char *text);
 int uart_control_read(char *buf, size_t max_len);
 
+// Minta DevKit mengirim 'count' (1..12) pesan riwayat terakhir lewat UART (HISTREQ/HISTRES).
+// days_ago < 0: pesan terakhir apa pun harinya; 0 = hanya hari ini; 1 = kemarin; dst (maks 60).
+// Hasil berupa teks siap baca (satu pesan per baris, paling lama di atas) di 'out'.
+// Mengembalikan panjang teks; 0 jika riwayat kosong, DevKit tidak menjawab, atau timeout.
+size_t uart_control_request_history(int count, int days_ago, char *out, size_t out_size, uint32_t timeout_ms);
+
 // Validate and execute one Gemini device command over UART.
 bool uart_control_execute_command(const char *command);
 
