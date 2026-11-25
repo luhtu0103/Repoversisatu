@@ -12,4 +12,5 @@
     "- Mengenali kebiasaan harian dan belajar selera pengguna, tersimpan terus.\n" \
     "- Riwayat obrolan lintas hari: bisa ditanya 'tadi' atau 'kemarin kita bahas apa'.\n" \
     "- Cek dan pasang pembaruan program lewat suara.\n" \
+    "- Pamit sendiri dan kembali standby kalau 30 detik tidak ada yang bicara; telinga dibuat kurang peka untuk rumah ramai.\n" \
     "- Melapor kondisi (sinyal, memori, putus-nyambung) ke halaman web DevKit; tidak perlu dibahas kecuali ditanya.\n"
