@@ -1,3 +1,4 @@
+#include "robot_stats.h"
 #include "websocket_internal.h"
 #include "display.h"
 #include "esp_log.h"
@@ -47,6 +48,7 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
             websocket_cleanup_pending = false;
             websocket_finish_received = false;
             is_connected = true;
+            robot_stats_ws_state(true);
             setup_complete = false;
             websocket_tx_error = false;
             websocket_connection_generation = websocket_connection_generation + 1;
@@ -70,6 +72,7 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
                                     (uint8_t)data->data_ptr[1];
                     ESP_LOGW(TAG, "CLOSE CODE: %u (0x%04X)",
                              (unsigned)code, (unsigned)code);
+                    robot_stats_note_close_code((int)code);
                     if (data->data_len > 2) {
                         char reason[96] = {};
                         size_t rl = (size_t)data->data_len - 2;
@@ -98,6 +101,7 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
 
         case WEBSOCKET_EVENT_ERROR:
             ESP_LOGE(TAG, "WebSocket Error!");
+            robot_stats_note_ws_drop("err", data ? data->error_handle.esp_transport_sock_errno : 0);
             {
                 wifi_ap_record_t ap = {};
                 if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
@@ -143,6 +147,7 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
 
         case WEBSOCKET_EVENT_DISCONNECTED:
             now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+            robot_stats_note_ws_drop("dc", 0);
             ESP_LOGW(TAG, "WebSocket TERPUTUS dari Gemini: rx_age_ms=%lu tx_age_ms=%lu tx_fail_count=%lu generation=%lu",
                      websocket_last_rx_ms ? (unsigned long)(now_ms - websocket_last_rx_ms) : 0xFFFFFFFFUL,
                      websocket_last_tx_ms ? (unsigned long)(now_ms - websocket_last_tx_ms) : 0xFFFFFFFFUL,
@@ -165,6 +170,7 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
 
         case WEBSOCKET_EVENT_CLOSED:
             ESP_LOGW(TAG, "WebSocket CLOSED");
+            robot_stats_note_ws_drop("cl", 0);
             is_connected = false;
             setup_complete = false;
             websocket_tx_error = true;
