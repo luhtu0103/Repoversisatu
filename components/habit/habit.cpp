@@ -1,7 +1,8 @@
-
 #include "habit.h"
+#include "release_notes.h"
 
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_timer.h"
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
@@ -318,4 +319,70 @@ bool habit_lesson_clear(void)
     save_locked();
     ESP_LOGI(TAG, "Semua pelajaran dihapus");
     return true;
+}
+
+/* ---------- catatan rilis & pengumuman pembaruan ---------- */
+static char s_pending_version[32] = "";   /* versi yang belum diumumkan; kosong = tidak ada */
+
+static void running_version(char *out, size_t n)
+{
+    snprintf(out, n, "0");
+    const esp_partition_t *part = esp_ota_get_running_partition();
+    esp_app_desc_t desc;
+    if (part && esp_ota_get_partition_description(part, &desc) == ESP_OK)
+        snprintf(out, n, "%.31s", desc.version);
+}
+
+static bool read_saved_version(char *out, size_t n)
+{
+    out[0] = '\0';
+    nvs_handle_t nvs;
+    if (nvs_open("habit", NVS_READONLY, &nvs) != ESP_OK) return false;
+    size_t size = n;
+    const bool ok = nvs_get_str(nvs, "fwver", out, &size) == ESP_OK;
+    nvs_close(nvs);
+    if (!ok) out[0] = '\0';
+    return ok;
+}
+
+size_t habit_build_release_context(char *out, size_t out_size)
+{
+    if (!out || out_size < 64) return 0;
+    out[0] = '\0';
+
+    char cur[32], saved[32];
+    running_version(cur, sizeof(cur));
+    read_saved_version(saved, sizeof(saved));
+    const bool updated = strcmp(cur, saved) != 0;
+
+    Guard g;
+    if (updated) snprintf(s_pending_version, sizeof(s_pending_version), "%s", cur);
+    else s_pending_version[0] = '\0';
+
+    size_t used = 0;
+    append(out, out_size, &used,
+           "Informasi program robot ini (versi %s). Fitur yang kamu miliki saat ini; jawab berdasarkan daftar ini "
+           "jika pengguna bertanya kamu bisa apa atau apa yang baru, dan jangan mengaku punya fitur di luar daftar:\n%s",
+           cur, RELEASE_NOTES);
+    if (updated) {
+        append(out, out_size, &used,
+               "Program robot ini baru saja diperbarui%s%s. Pada jawaban pertamamu di percakapan ini, sebutkan SATU kali "
+               "dengan singkat dan santai bahwa kamu baru diperbarui dan sebut satu atau dua hal dari daftar di atas, "
+               "lalu lanjutkan menjawab pengguna. Jangan diulang lagi.",
+               saved[0] ? " dari versi " : "", saved[0] ? saved : "");
+    }
+    return used;
+}
+
+void habit_release_mark_announced(void)
+{
+    Guard g;
+    if (!s_pending_version[0]) return;
+    nvs_handle_t nvs;
+    if (nvs_open("habit", NVS_READWRITE, &nvs) == ESP_OK) {
+        if (nvs_set_str(nvs, "fwver", s_pending_version) == ESP_OK) nvs_commit(nvs);
+        nvs_close(nvs);
+        ESP_LOGI(TAG, "Pengumuman pembaruan selesai; versi %s disimpan", s_pending_version);
+    }
+    s_pending_version[0] = '\0';
 }
