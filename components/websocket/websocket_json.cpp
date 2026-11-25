@@ -7,6 +7,7 @@
 #include "servo_head.h"
 #include "alarm.h"
 #include "ota_update.h"
+#include "habit.h"
 
 #include "esp_attr.h"
 #include "esp_log.h"
@@ -373,6 +374,47 @@ static void add_volume_tool(cJSON *setup)
     cJSON_AddItemToArray(decls, decl);
 }
 
+/* Tool "simpan_pelajaran": Gemini menyimpan kalimat pendek tentang kebiasaan/selera
+ * pengguna. Terpisah dari ai_memory (yang hanya boleh diubah lewat perintah eksplisit). */
+static void add_learn_tool(cJSON *setup)
+{
+    if (!setup) return;
+    cJSON *tools = cJSON_GetObjectItem(setup, "tools");
+    if (!cJSON_IsArray(tools)) return;
+    cJSON *tool = NULL, *decls = NULL;
+    cJSON_ArrayForEach(tool, tools) {
+        decls = cJSON_GetObjectItem(tool, "functionDeclarations");
+        if (cJSON_IsArray(decls)) break;
+        decls = NULL;
+    }
+    if (!decls) return;
+    cJSON *decl = cJSON_CreateObject();
+    if (!decl) return;
+    cJSON_AddStringToObject(decl, "name", "simpan_pelajaran");
+    cJSON_AddStringToObject(decl, "behavior", "BLOCKING");
+    cJSON_AddStringToObject(decl, "description",
+        "Simpan satu kalimat pendek (maksimal 100 karakter) tentang selera atau kebiasaan pengguna yang tidak sensitif, agar kamu makin mengenalnya. "
+        "Gunakan action simpan secara diam-diam tanpa mengumumkannya. Jangan simpan kesehatan, uang, kata sandi, rahasia, atau data orang lain. "
+        "Gunakan action baca jika pengguna bertanya apa yang sudah kamu pelajari, lalu ceritakan dengan santai. "
+        "Gunakan action hapus_semua hanya jika pengguna jelas meminta kamu melupakan pelajaranmu; setelah itu konfirmasi dengan suara.");
+    cJSON *params = cJSON_AddObjectToObject(decl, "parameters");
+    cJSON_AddStringToObject(params, "type", "OBJECT");
+    cJSON *props = cJSON_AddObjectToObject(params, "properties");
+    cJSON *action = cJSON_AddObjectToObject(props, "action");
+    cJSON_AddStringToObject(action, "type", "STRING");
+    cJSON_AddStringToObject(action, "description", "simpan, baca, atau hapus_semua.");
+    cJSON *action_enum = cJSON_AddArrayToObject(action, "enum");
+    cJSON_AddItemToArray(action_enum, cJSON_CreateString("simpan"));
+    cJSON_AddItemToArray(action_enum, cJSON_CreateString("baca"));
+    cJSON_AddItemToArray(action_enum, cJSON_CreateString("hapus_semua"));
+    cJSON *teks = cJSON_AddObjectToObject(props, "teks");
+    cJSON_AddStringToObject(teks, "type", "STRING");
+    cJSON_AddStringToObject(teks, "description", "Kalimat pendek yang dipelajari; wajib untuk action=simpan.");
+    cJSON *required = cJSON_AddArrayToObject(params, "required");
+    cJSON_AddItemToArray(required, cJSON_CreateString("action"));
+    cJSON_AddItemToArray(decls, decl);
+}
+
 static void add_ota_tool(cJSON *setup)
 {
     if (!setup) return;
@@ -507,6 +549,17 @@ bool build_gemini_setup(char **output, size_t *output_len)
     } else if (memory_part) {
         cJSON_Delete(memory_part);
     }
+    /* Konteks kebiasaan: waktu, kedekatan, kebiasaan, pelajaran, aturan gaya.
+     * Disusun sekali per sesi; buffer di PSRAM agar RAM internal hemat. */
+    static EXT_RAM_BSS_ATTR char habit_context[2304];
+    size_t habit_len = habit_build_context(habit_context, sizeof(habit_context));
+    if (habit_len > 0) {
+        cJSON *habit_part = cJSON_CreateObject();
+        if (habit_part) {
+            cJSON_AddStringToObject(habit_part, "text", habit_context);
+            cJSON_AddItemToArray(system_parts, habit_part);
+        }
+    }
     /* 2 KiB role buffer: 2047 bytes of text plus the terminating NUL. */
     static char role_text[2048];
 
@@ -525,6 +578,7 @@ bool build_gemini_setup(char **output, size_t *output_len)
     add_radio_tool(setup);
     add_ota_tool(setup);
     add_volume_tool(setup);
+    add_learn_tool(setup);
 
     cJSON *realtime = cJSON_AddObjectToObject(setup, "realtimeInputConfig");
     cJSON *aad = cJSON_AddObjectToObject(realtime, "automaticActivityDetection");
@@ -772,6 +826,7 @@ static void process_gemini_tool_call(cJSON *tool_call)
                 (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
                     "Pencarian gagal: query kosong.");
             } else {
+                habit_note_event("cari");
                 websocket_set_mic_uplink_paused(true);
                 if (!websocket_search_start(id->valuestring, query->valuestring)) {
                     websocket_set_mic_uplink_paused(false);
@@ -784,6 +839,7 @@ static void process_gemini_tool_call(cJSON *tool_call)
         } else if (strcmp(name->valuestring, "putar_radio") == 0) {
             cJSON *query = cJSON_GetObjectItem(args, "query");
             const char *qs = (cJSON_IsString(query) && query->valuestring) ? query->valuestring : "";
+            habit_note_event("radio");
             /* Tahan mic selagi mencari stasiun; dibuka lagi setelah balasan Gemini selesai. */
             websocket_set_mic_uplink_paused(true);
             if (!websocket_radio_start(id->valuestring, qs)) {
@@ -821,6 +877,40 @@ static void process_gemini_tool_call(cJSON *tool_call)
             }
             ESP_LOGI(TAG, "VOLUME TOOL action=%s -> %s", act, detail);
             (void)websocket_send_tool_response_text(id->valuestring, name->valuestring, detail);
+            continue;
+        } else if (strcmp(name->valuestring, "simpan_pelajaran") == 0) {
+            cJSON *action = cJSON_GetObjectItem(args, "action");
+            cJSON *teks = cJSON_GetObjectItem(args, "teks");
+            const char *act = (cJSON_IsString(action) && action->valuestring) ? action->valuestring : "";
+            static char learn_buf[640];   /* static: tidak membebani stack task WebSocket */
+            learn_buf[0] = '\0';
+            if (strcmp(act, "simpan") == 0) {
+                if (!cJSON_IsString(teks) || !teks->valuestring || !teks->valuestring[0]) {
+                    snprintf(learn_buf, sizeof(learn_buf), "Gagal: kalimat pelajaran kosong.");
+                } else {
+                    (void)habit_lesson_add(teks->valuestring, learn_buf, sizeof(learn_buf));
+                }
+            } else if (strcmp(act, "baca") == 0) {
+                if (habit_lesson_list(learn_buf, sizeof(learn_buf)) == 0)
+                    snprintf(learn_buf, sizeof(learn_buf), "Belum ada yang kamu pelajari tentang pengguna.");
+            } else if (strcmp(act, "hapus_semua") == 0) {
+                static const char *const forget_terms[] = {
+                    "lupakan", "hapus pelajaran", "hapus semua pelajaran", "reset pelajaran"
+                };
+                if (!transcript_has_any(latest_user_transcript, forget_terms,
+                        sizeof(forget_terms) / sizeof(forget_terms[0]))) {
+                    snprintf(learn_buf, sizeof(learn_buf),
+                             "Ditolak: pengguna belum jelas meminta kamu melupakan pelajaranmu.");
+                } else {
+                    snprintf(learn_buf, sizeof(learn_buf), "%s",
+                             habit_lesson_clear() ? "Semua pelajaran sudah dihapus. Konfirmasikan dengan suara."
+                                                  : "Gagal menghapus pelajaran.");
+                }
+            } else {
+                snprintf(learn_buf, sizeof(learn_buf), "Gagal: aksi tidak dikenal.");
+            }
+            ESP_LOGI(TAG, "PELAJARAN TOOL action=%s", act);
+            (void)websocket_send_tool_response_text(id->valuestring, name->valuestring, learn_buf);
             continue;
         } else if (strcmp(name->valuestring, "update_firmware") == 0) {
             cJSON *action = cJSON_GetObjectItem(args, "action");
@@ -889,6 +979,7 @@ static void process_gemini_tool_call(cJSON *tool_call)
                 success = alarm_add(relative ? 0 : hour->valueint, relative ? 0 : minute->valueint,
                                     relative ? rel->valueint : 0, kind, repeat,
                                     effective_label, detail, sizeof(detail));
+                if (success) habit_note_event("alarm");
             } else if (strcmp(action->valuestring, "cancel") == 0) {
                 cJSON *id_j = cJSON_GetObjectItem(args, "id");
                 cJSON *all_j = cJSON_GetObjectItem(args, "all");
@@ -930,6 +1021,12 @@ static void process_gemini_tool_call(cJSON *tool_call)
                 else {
                     success = uart_control_execute_command(cmd);
                     ESP_LOGI(TAG, "DEVICE TOOL command=%s result=%s", cmd, success ? "OK" : "REJECTED");
+                    if (success) {
+                        if (strcmp(cmd, "r3") == 0) habit_note_event("lampu");
+                        else if (strcmp(cmd, "r1") == 0 || strcmp(cmd, "r2") == 0) habit_note_event("colokan");
+                        else if (strncmp(cmd, "fan_", 4) == 0) habit_note_event("kipas");
+                        else if (strncmp(cmd, "mp3_", 4) == 0 || strcmp(cmd, "r4") == 0) habit_note_event("mp3");
+                    }
                 }
             } else {
                 ESP_LOGW(TAG, "control_device tanpa argument command");
