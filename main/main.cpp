@@ -225,6 +225,11 @@ static char radio_note_name[48] = {};
 static int radio_note_reason = 0;
 static bool radio_note_pending = false;
 
+/* Sepi: tidak ada giliran Gemini selama IDLE_CLOSE_US -> Gemini pamit, lalu robot kembali standby. */
+static constexpr int64_t IDLE_CLOSE_US = 30LL * 1000000LL;
+static int64_t idle_since_us = 0;
+static int idle_postponed = 0;
+
 /* Ring 1,5 detik audio mentah untuk Speaker ID. MFCC+DTW harus berjalan
  * di worker terpisah agar audio_task tetap menguras antrean mikrofon. */
 constexpr size_t WAKE_RING_SAMPLES = 24000;
@@ -776,6 +781,7 @@ static void audio_task(void *arg)
             speaker_candidate_count = 0;
             utt_reset();
             portEXIT_CRITICAL(&speaker_context_mux);
+            idle_since_us = 0; idle_postponed = 0;
             // Wait for the previous WebSocket client to be destroyed before
             // detecting another wake word and starting a fresh Gemini session.
             static int64_t lifecycle_busy_since_us = 0;
@@ -868,6 +874,7 @@ static void audio_task(void *arg)
         if (!websocket_is_connected()) {
             tx_backpressure_start_us = 0;
             consecutive_tx_enqueue_failures = 0;
+            idle_since_us = 0; idle_postponed = 0;
 
             /*
              * Give the reconnect manager a full 15 seconds after each loss of
@@ -945,6 +952,40 @@ static void audio_task(void *arg)
                     ESP_LOGI(TAG, "Prompt alarm terkirim ke Gemini; menunggu audio selesai lalu kembali standby");
                 } else {
                     ESP_LOGI(TAG, "Prompt pengingat terkirim ke Gemini; sesi obrolan tetap berjalan");
+                }
+            }
+        }
+
+        /* Sepi 30 detik: Gemini diminta pamit (boleh bertanya sekilas), lalu kembali standby.
+         * Dihitung dari giliran Gemini terakhir. Obrolan keluarga yang tidak ditujukan ke robot tidak menahan timer. */
+        {
+            const bool idle_busy = audio_turn_active || audio_turn_complete_pending || websocket_mic_uplink_paused ||
+                                   standby_pending || alarm_prompt_pending || radio_note_pending ||
+                                   radio_has_pending() || radio_is_active() || !setup_complete;
+            if (idle_busy) {
+                idle_since_us = 0;
+                idle_postponed = 0;
+            } else {
+                const int64_t idle_now_us = esp_timer_get_time();
+                if (idle_since_us == 0) {
+                    idle_since_us = idle_now_us;
+                } else if (idle_now_us - idle_since_us >= IDLE_CLOSE_US) {
+                    if (mic_voice_detected && idle_postponed < 2) {
+                        /* Ada yang sedang bicara tepat sekarang: beri 5 detik lagi (maksimal 2 kali). */
+                        ++idle_postponed;
+                        idle_since_us = idle_now_us - IDLE_CLOSE_US + 5000000LL;
+                    } else {
+                        (void)websocket_take_audio_playback_complete();   // buang tanda lama agar standby menunggu pamit selesai
+                        if (websocket_send_idle_goodbye()) {
+                            ESP_LOGI(TAG, "Sepi 30 detik: Gemini diminta pamit, lalu standby");
+                            standby_pending = true;
+                            standby_requested_us = idle_now_us;
+                            idle_since_us = 0;
+                            idle_postponed = 0;
+                        } else {
+                            idle_since_us = idle_now_us - IDLE_CLOSE_US + 3000000LL;   // coba lagi 3 detik
+                        }
+                    }
                 }
             }
         }
