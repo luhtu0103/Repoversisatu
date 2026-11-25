@@ -30,6 +30,8 @@ static volatile bool s_started = false;
 static volatile int s_wifi_reason = 0;
 static volatile int s_close_code = 0;
 static volatile int64_t s_ws_up_since_us = 0;
+static volatile int32_t s_mic_peak = 0;   /* puncak |sampel| dalam jendela 1 menit */
+static volatile int32_t s_mic_clip = 0;   /* jumlah sampel >= 32000 (nyaris pecah) */
 
 static int current_rssi(int *channel)
 {
@@ -77,13 +79,16 @@ static void send_stat(void)
     }
     int ch = 0;
     int rssi = current_rssi(&ch);
-    char line[200];
-    snprintf(line, sizeof(line), "STAT|%s|%lu|%d|%d|%u|%u|%u|%d|%u", ver,
+    const int32_t mic_peak = s_mic_peak, mic_clip = s_mic_clip;
+    s_mic_peak = 0;
+    s_mic_clip = 0;
+    char line[220];
+    snprintf(line, sizeof(line), "STAT|%s|%lu|%d|%d|%u|%u|%u|%d|%u|%ld|%ld", ver,
              (unsigned long)(esp_timer_get_time() / 1000000LL), rssi, ch,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-             s_ws_up ? 1 : 0, s_drops);
+             s_ws_up ? 1 : 0, s_drops, (long)mic_peak, (long)mic_clip);
     uart_control_send(line);
 }
 
@@ -151,6 +156,20 @@ void robot_stats_ws_state(bool connected)
 {
     if (connected && !s_ws_up) s_ws_up_since_us = esp_timer_get_time();
     s_ws_up = connected;
+}
+
+void robot_stats_mic_feed(const int16_t *samples, size_t count)
+{
+    if (!samples || count == 0) return;
+    int32_t peak = 0, clip = 0;
+    for (size_t i = 0; i < count; ++i) {
+        int32_t v = samples[i];
+        if (v < 0) v = -v;
+        if (v > peak) peak = v;
+        if (v >= 32000) ++clip;
+    }
+    if (peak > s_mic_peak) s_mic_peak = peak;
+    if (clip > 0) s_mic_clip = s_mic_clip + clip;
 }
 
 void robot_stats_note_close_code(int code)
