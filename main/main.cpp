@@ -29,6 +29,7 @@
 
 #include "nvs_flash.h"
 #include "esp_sntp.h"
+#include "robot_stats.h"
 
 #include <sys/time.h>
 #include <time.h>
@@ -786,7 +787,8 @@ static void audio_task(void *arg)
                     lifecycle_busy_since_us = busy_now_us;
                 } else if (busy_now_us - lifecycle_busy_since_us > 30 * 1000000LL) {
                     ESP_LOGE(TAG, "Koneksi Gemini macet > 30 detik saat menunggu wake word; restart untuk pulih");
-                    vTaskDelay(pdMS_TO_TICKS(200));
+                    robot_stats_event("restart_macet");
+                    vTaskDelay(pdMS_TO_TICKS(300));
                     esp_restart();
                 }
                 buffer_pos = 0;
@@ -1088,7 +1090,7 @@ extern "C" void app_main()
         esp_restart();
     }
 
-    esp_wifi_set_ps(WIFI_PS_NONE); ESP_LOGI(TAG, "WiFi power save dimatikan"); ESP_LOGI(TAG, "WIFI READY - lanjut ke NTP"); bool ntp_time_synced = sync_sntp_time(); alarm_set_time_ready(ntp_time_synced); if (!alarm_init()) ESP_LOGW(TAG, "Alarm NVS belum siap; fitur alarm mungkin belum bisa digunakan"); ESP_LOGI(TAG, "Menunggu 1 detik..."); vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_wifi_set_ps(WIFI_PS_NONE); ESP_LOGI(TAG, "WiFi power save dimatikan"); ESP_LOGI(TAG, "WIFI READY - lanjut ke NTP"); bool ntp_time_synced = sync_sntp_time(); alarm_set_time_ready(ntp_time_synced); robot_stats_start(); if (!alarm_init()) ESP_LOGW(TAG, "Alarm NVS belum siap; fitur alarm mungkin belum bisa digunakan"); ESP_LOGI(TAG, "Menunggu 1 detik..."); vTaskDelay(pdMS_TO_TICKS(1000));
     debug_network_path(); vTaskDelay(pdMS_TO_TICKS(1000)); face_set_state(FACE_SLEEP); display_status("Sistem siap. Katakan Hi, ESP...");
 
     BaseType_t task_result = xTaskCreate(audio_task, "audio_task", 10240, NULL, 5, NULL); if (task_result != pdPASS) ESP_LOGE(TAG, "Gagal membuat audio_task!"); else ESP_LOGI(TAG, "audio_task berhasil dimulai.");
