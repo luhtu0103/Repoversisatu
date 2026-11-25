@@ -4,6 +4,8 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "UART_CTRL";
@@ -116,6 +118,92 @@ void uart_control_send_web_search(const char *text)
     }
     uart_write_bytes(UART_CONTROL_NUM, "WSRCH|END\n", sizeof("WSRCH|END\n") - 1);
     ESP_LOGI(TAG, "Hasil pencarian dikirim ke UART: %u byte", (unsigned)total);
+}
+
+/* Ubah umur pesan (menit) menjadi kata Indonesia yang mudah dibaca. */
+static void format_age(long age_min, char *out, size_t n)
+{
+    if (age_min < 0)         snprintf(out, n, "waktu tidak diketahui");
+    else if (age_min < 2)    snprintf(out, n, "baru saja");
+    else if (age_min < 60)   snprintf(out, n, "%ld menit lalu", age_min);
+    else if (age_min < 1440) snprintf(out, n, "%ld jam lalu", age_min / 60);
+    else                     snprintf(out, n, "%ld hari lalu", age_min / 1440);
+}
+
+/* Protokol riwayat (robot <-> DevKit):
+ *   robot  -> DevKit : HISTREQ|<n>\n   atau   HISTREQ|<n>|<hari_lalu>\n
+ *   DevKit -> robot  : HISTRES|BEGIN|<jumlah>\n
+ *                      HISTRES|ITEM|<umur_menit atau -1>|<U atau A>|<teks>\n   (diulang)
+ *                      HISTRES|END\n
+ */
+size_t uart_control_request_history(int count, int days_ago, char *out, size_t out_size, uint32_t timeout_ms)
+{
+    if (!out || out_size < 32) return 0;
+    out[0] = '\0';
+    if (count < 1) count = 1;
+    if (count > 12) count = 12;
+    if (days_ago > 60) days_ago = 60;
+
+    static char line[384];            /* static: tidak membebani stack task */
+    size_t line_len = 0;
+    bool overflow = false;
+    size_t used = 0;
+    bool done = false;
+
+    uart_flush_input(UART_CONTROL_NUM);
+    char req[32];
+    if (days_ago >= 0) snprintf(req, sizeof(req), "HISTREQ|%d|%d", count, days_ago);
+    else               snprintf(req, sizeof(req), "HISTREQ|%d", count);
+    uart_control_send(req);
+
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    uint8_t chunk[64];
+    while (!done) {
+        const TickType_t now = xTaskGetTickCount();
+        if ((int32_t)(deadline - now) <= 0) break;
+        TickType_t wait = deadline - now;
+        if (wait > pdMS_TO_TICKS(50)) wait = pdMS_TO_TICKS(50);
+        const int got = uart_read_bytes(UART_CONTROL_NUM, chunk, sizeof(chunk), wait);
+        if (got <= 0) continue;
+        for (int i = 0; i < got && !done; ++i) {
+            const char c = (char)chunk[i];
+            if (c == '\r') continue;
+            if (c != '\n') {
+                if (line_len < sizeof(line) - 1) line[line_len++] = c;
+                else overflow = true;
+                continue;
+            }
+            line[line_len] = '\0';
+            const bool bad = overflow;
+            line_len = 0;
+            overflow = false;
+            if (bad || line[0] == '\0') continue;
+
+            if (strcmp(line, "HISTRES|END") == 0) {
+                done = true;
+            } else if (strncmp(line, "HISTRES|ITEM|", 13) == 0) {
+                char *p = line + 13;
+                char *end = NULL;
+                const long age = strtol(p, &end, 10);
+                if (end == p || *end != '|') continue;
+                const char role = end[1];
+                if ((role != 'U' && role != 'A') || end[2] != '|') continue;
+                const char *text = end + 3;
+                if (!text[0]) continue;
+                char when[32];
+                format_age(age, when, sizeof(when));
+                if (used >= out_size - 1) continue;
+                const int w = snprintf(out + used, out_size - used, "- [%s] %s: %s\n",
+                                       when, role == 'U' ? "Pengguna" : "Kamu", text);
+                if (w > 0 && (size_t)w < out_size - used) used += (size_t)w;
+                else { out[used] = '\0'; done = true; }   /* buffer penuh: cukup sampai sini */
+            }
+            /* HISTRES|BEGIN dan baris lain diabaikan. */
+        }
+    }
+    out[used] = '\0';
+    ESP_LOGI(TAG, "Riwayat dari DevKit: %u byte (selesai=%d)", (unsigned)used, done ? 1 : 0);
+    return used;
 }
 
 bool uart_control_execute_sensor_command(const char *command, char *response, size_t response_len, uint32_t timeout_ms)
