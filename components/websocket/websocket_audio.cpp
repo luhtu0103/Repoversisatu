@@ -31,7 +31,8 @@ static SemaphoreHandle_t audio_send_mutex = NULL;
 #define AUDIO_OUTPUT_SAMPLE_RATE 24000U
 #define AUDIO_OUTPUT_BYTES_PER_SEC (AUDIO_OUTPUT_SAMPLE_RATE * 2U)
 #define AUDIO_RING_BUFFER_SIZE (512 * 1024)
-#define AUDIO_PLAYBACK_PREBUFFER_SIZE (32 * 1024)
+/* 16 KB = sekitar 0,33 detik suara sebelum diputar (dulu 32 KB = 0,7 detik). Kalau suara putus-putus, naikkan lagi. */
+#define AUDIO_PLAYBACK_PREBUFFER_SIZE (16 * 1024)
 #define AUDIO_PLAYBACK_RESUME_SIZE (4 * 1024)
 #define AUDIO_PLAYBACK_READ_SIZE 2048
 #define AUDIO_PLAYBACK_READ_WAIT_MS 5
