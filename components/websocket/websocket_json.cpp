@@ -415,6 +415,37 @@ static void add_learn_tool(cJSON *setup)
     cJSON_AddItemToArray(decls, decl);
 }
 
+/* Tool "riwayat_obrolan": membaca pesan terakhir yang tersimpan di DevKit (lewat UART). */
+static void add_history_tool(cJSON *setup)
+{
+    if (!setup) return;
+    cJSON *tools = cJSON_GetObjectItem(setup, "tools");
+    if (!cJSON_IsArray(tools)) return;
+    cJSON *tool = NULL, *decls = NULL;
+    cJSON_ArrayForEach(tool, tools) {
+        decls = cJSON_GetObjectItem(tool, "functionDeclarations");
+        if (cJSON_IsArray(decls)) break;
+        decls = NULL;
+    }
+    if (!decls) return;
+    cJSON *decl = cJSON_CreateObject();
+    if (!decl) return;
+    cJSON_AddStringToObject(decl, "name", "riwayat_obrolan");
+    cJSON_AddStringToObject(decl, "behavior", "BLOCKING");
+    cJSON_AddStringToObject(decl, "description",
+        "Membaca riwayat obrolan antara pengguna dan kamu (ratusan pesan, tersimpan lintas hari). Panggil HANYA saat pengguna bertanya tentang obrolan sebelumnya, misalnya 'tadi kita bahas apa', 'kemarin ngobrol apa', 'lanjutkan yang tadi', atau 'tadi aku tanya apa'. Jika pengguna menyebut harinya (kemarin, dua hari lalu), isi hari_lalu; jika hanya 'tadi', biarkan kosong. Jangan dipanggil untuk pertanyaan biasa. Hasilnya berisi pesan dari paling lama ke paling baru beserta kapan terjadinya; pesan paling bawah biasanya pertanyaan pengguna barusan, jadi abaikan. Jawab santai dengan merangkum isi hasil itu, dan jangan mengarang isi obrolan yang tidak ada di hasil. Jika hasilnya kosong, katakan terus terang belum ada riwayat.");
+    cJSON *params = cJSON_AddObjectToObject(decl, "parameters");
+    cJSON_AddStringToObject(params, "type", "OBJECT");
+    cJSON *props = cJSON_AddObjectToObject(params, "properties");
+    cJSON *jumlah = cJSON_AddObjectToObject(props, "jumlah");
+    cJSON_AddStringToObject(jumlah, "type", "INTEGER");
+    cJSON_AddStringToObject(jumlah, "description", "Berapa pesan yang dibaca, 1 sampai 12. Bawaan 6 (10 jika hari_lalu diisi).");
+    cJSON *hari = cJSON_AddObjectToObject(props, "hari_lalu");
+    cJSON_AddStringToObject(hari, "type", "INTEGER");
+    cJSON_AddStringToObject(hari, "description", "Pilih satu hari saja: 0 = hari ini, 1 = kemarin, 2 = dua hari lalu, dst (maks 60). Kosongkan jika pengguna tidak menyebut hari; maka dibaca pesan terakhir apa pun harinya.");
+    cJSON_AddItemToArray(decls, decl);
+}
+
 static void add_ota_tool(cJSON *setup)
 {
     if (!setup) return;
@@ -531,6 +562,7 @@ bool build_gemini_setup(char **output, size_t *output_len)
 #else
     "Untuk pertanyaan tentang informasi terbaru, harga, perbandingan produk/toko, berita, atau fakta yang perlu diverifikasi, panggil web_search sebelum menjawab. Setelah hasil tool diterima, gunakan judul, URL sumber, dan cuplikan yang benar-benar diberikan. Jika ada satu atau lebih hasil yang relevan, rangkum informasi yang didukung hasil tersebut terlebih dahulu; jangan mengatakan tidak menemukan informasi hanya karena cuplikan tidak memuat semua detail. Jelaskan secara spesifik detail apa yang belum tersedia, jangan menebak, dan minta pengguna memperjelas hanya jika pertanyaannya ambigu. Sebutkan nama sumber atau domain yang tersedia, dan bacakan URL lengkap hanya jika diminta. Jika hasil pencarian kosong atau tool melaporkan kegagalan, jelaskan bahwa pencarian tidak berhasil; jangan berpura-pura sudah browsing. Untuk permintaan harga/perbandingan, cari dengan kata kunci yang menyertakan model tepat, harga, toko, dan wilayah bila relevan. "
 #endif
+    "Jika pengguna bertanya tentang obrolan sebelumnya (misalnya tadi kita bahas apa, kemarin ngobrol apa, atau lanjutkan yang tadi), panggil riwayat_obrolan lalu jawab santai berdasarkan hasilnya; jangan mengarang isi obrolan yang tidak ada di hasil. "
     "Jangan menyebutkan harga terkini atau membandingkan toko hanya dari pengetahuan internal jika pengguna meminta pencarian web.");
     cJSON_AddItemToArray(system_parts, system_text);
 
@@ -579,6 +611,7 @@ bool build_gemini_setup(char **output, size_t *output_len)
     add_ota_tool(setup);
     add_volume_tool(setup);
     add_learn_tool(setup);
+    add_history_tool(setup);
 
     cJSON *realtime = cJSON_AddObjectToObject(setup, "realtimeInputConfig");
     cJSON *aad = cJSON_AddObjectToObject(realtime, "automaticActivityDetection");
@@ -877,6 +910,24 @@ static void process_gemini_tool_call(cJSON *tool_call)
             }
             ESP_LOGI(TAG, "VOLUME TOOL action=%s -> %s", act, detail);
             (void)websocket_send_tool_response_text(id->valuestring, name->valuestring, detail);
+            continue;
+        } else if (strcmp(name->valuestring, "riwayat_obrolan") == 0) {
+            cJSON *jumlah = cJSON_GetObjectItem(args, "jumlah");
+            cJSON *hari_lalu = cJSON_GetObjectItem(args, "hari_lalu");
+            const int days = cJSON_IsNumber(hari_lalu) ? hari_lalu->valueint : -1;
+            int n = cJSON_IsNumber(jumlah) ? jumlah->valueint : (days >= 0 ? 10 : 6);
+            static EXT_RAM_BSS_ATTR char hist_buf[3584];   /* static di PSRAM: tidak membebani stack */
+            static const char hist_header[] =
+                "Riwayat obrolan terakhir (paling lama di atas, paling baru di bawah). "
+                "Baris paling bawah biasanya pertanyaan pengguna barusan; abaikan.\n";
+            const size_t header_len = sizeof(hist_header) - 1;
+            memcpy(hist_buf, hist_header, header_len + 1);
+            const size_t got = uart_control_request_history(n, days, hist_buf + header_len,
+                                                            sizeof(hist_buf) - header_len, 2500);
+            ESP_LOGI(TAG, "RIWAYAT TOOL jumlah=%d hari_lalu=%d hasil=%u byte", n, days, (unsigned)got);
+            (void)websocket_send_tool_response_text(id->valuestring, name->valuestring,
+                got > 0 ? hist_buf
+                        : "Belum ada riwayat obrolan yang tersimpan, atau perangkat penyimpan riwayat (DevKit) tidak menjawab. Katakan terus terang kamu belum bisa melihat obrolan sebelumnya.");
             continue;
         } else if (strcmp(name->valuestring, "simpan_pelajaran") == 0) {
             cJSON *action = cJSON_GetObjectItem(args, "action");
