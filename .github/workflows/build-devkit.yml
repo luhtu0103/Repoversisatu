@@ -1,0 +1,86 @@
+name: DevKit (Arduino) firmware
+
+# Mengompilasi program DevKit (components/uart_control/Esp32devkit) menjadi file .bin
+# dan menaruhnya di GitHub Release bertanda "pra-rilis" (prerelease) supaya OTA robot
+# (yang memakai "latest") TIDAK terganggu.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - components/uart_control/Esp32devkit
+      - .github/workflows/build-devkit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  devkit:
+    name: Arduino-ESP32 / DevKit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core and libraries
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          arduino-cli lib install "IRremoteESP8266"
+          arduino-cli core list
+          arduino-cli lib list
+
+      - name: Prepare sketch folder
+        run: |
+          mkdir -p sketch/devkit
+          cp components/uart_control/Esp32devkit sketch/devkit/devkit.ino
+
+      - name: Compile (partition scheme Default 4MB with spiffs)
+        run: |
+          arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=default --export-binaries sketch/devkit
+          find sketch/devkit/build -name "*.bin" -print
+
+      - name: Prepare release files
+        run: |
+          mkdir -p out
+          APP=$(find sketch/devkit/build -name "devkit.ino.bin" | head -n 1)
+          MERGED=$(find sketch/devkit/build -name "devkit.ino.merged.bin" | head -n 1)
+          test -s "$APP"
+          test -s "$MERGED"
+          cp "$APP" out/devkit-ota.bin
+          cp "$MERGED" out/devkit-pertama-kali.bin
+          SIZE=$(stat -c %s out/devkit-ota.bin)
+          echo "Ukuran program DevKit: $SIZE byte (batas slot OTA $((0x140000)))"
+          test "$SIZE" -le $((0x140000))
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Devkit-Firmware
+          path: out/*.bin
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish prerelease (tidak mengganti release OTA robot)
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: devkit-${{ github.run_number }}
+          name: DevKit ${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          make_latest: false
+          body: |
+            Program DevKit (Arduino).
+            - devkit-ota.bin: dipasang lewat halaman /ota di web DevKit.
+            - devkit-pertama-kali.bin: untuk pasang pertama kali lewat USB (alamat 0x0).
+          files: |
+            out/devkit-ota.bin
+            out/devkit-pertama-kali.bin
