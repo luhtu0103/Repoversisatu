@@ -764,6 +764,7 @@ static void audio_task(void *arg)
                 }
                 const uint32_t mean_energy = (uint32_t)(energy_sum / sample_count);
                 mic_voice_detected = mean_energy > AUDIO_VOICE_ENERGY_THRESHOLD_SQ;
+                robot_stats_mic_feed(samples, sample_count);
                 utterance_feed(samples, sample_count, mean_energy > AUDIO_VOICE_ENERGY_THRESHOLD_SQ / 4);
             } else {
                 mic_voice_detected = false;
