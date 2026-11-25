@@ -33,6 +33,7 @@ idf_component_register(
         radio_player
         ota_update
         habit
+        robot_stats
 )
 
 target_link_libraries(${COMPONENT_LIB} INTERFACE
