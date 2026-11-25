@@ -35,7 +35,8 @@ static bool supported_tool_name(const char *name)
         strcmp(name, "putar_radio") == 0 ||
         strcmp(name, "update_firmware") == 0 ||
         strcmp(name, "atur_volume") == 0 ||
-        strcmp(name, "simpan_pelajaran") == 0);
+        strcmp(name, "simpan_pelajaran") == 0 ||
+        strcmp(name, "riwayat_obrolan") == 0);
 }
 
 static bool send_tool_payload(const char *id, const char *name, const char *result)
