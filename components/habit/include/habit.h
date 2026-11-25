@@ -23,6 +23,14 @@ bool habit_lesson_add(const char *text, char *detail, size_t detail_size);
 size_t habit_lesson_list(char *out, size_t out_size);   /* isi teks, 0 jika kosong */
 bool habit_lesson_clear(void);
 
+/* Catatan rilis: daftar kemampuan robot + (jika program baru diperbarui) perintah mengumumkan sekali.
+ * Dipanggil tiap sesi Gemini dibuat. Mengembalikan panjang teks; 0 jika gagal. */
+size_t habit_build_release_context(char *out, size_t out_size);
+
+/* Dipanggil saat satu giliran Gemini selesai (turnComplete). Jika ada pengumuman pembaruan yang
+ * tertunda, versi sekarang disimpan sehingga pengumuman tidak diulang. */
+void habit_release_mark_announced(void);
+
 #ifdef __cplusplus
 }
 #endif
