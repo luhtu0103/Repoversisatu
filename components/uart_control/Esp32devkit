@@ -6,6 +6,7 @@
 #include <time.h>
 #include <math.h>
 #include <Preferences.h>
+#include <LittleFS.h>
 
 // =====================================================
 // WIFI CONFIGURATION
@@ -201,7 +202,9 @@ void historyLoad() {
     else memset(&historyEntries[i], 0, sizeof(HistoryEntry));
   }
 }
+void historyFileAppend(char role, const char* message);
 void historyAppend(char role, const char* message) {
+  historyFileAppend(role, message);
   if (!historyPrefsReady || !message || !message[0]) return;
   HistoryEntry entry = {};
   entry.timestamp = (uint32_t)time(nullptr); entry.role = role;
@@ -213,6 +216,162 @@ void historyAppend(char role, const char* message) {
   if (historyCount < HISTORY_MAX_ENTRIES) ++historyCount;
   historyPrefs.putUInt("next", historyNext); historyPrefs.putUInt("count", historyCount);
 }
+// =====================================================
+// RIWAYAT PANJANG DI FILE (LittleFS)
+// File teks /hist.log, satu baris per pesan:  <epoch>|<U atau A>|<teks>
+// Kalau file melewati HIST_FILE_MAX, separuh bagian paling lama dibuang (sistem cincin).
+// Jika LittleFS tidak tersedia (skema partisi tanpa SPIFFS), program memakai riwayat NVS 24 pesan seperti sebelumnya.
+// =====================================================
+static const char* HIST_FILE = "/hist.log";
+static const char* HIST_TMP = "/hist.tmp";
+static const size_t HIST_FILE_MAX = 72 * 1024;   // sekitar 300 pesan
+static const size_t HIST_TEXT_MAX = 200;         // byte teks per pesan di file
+static const long HIST_TZ_SEC = 8 * 3600;        // WITA, sama dengan configTime di konfigurasiNTP()
+bool historyFsReady = false;
+
+void historyFsBegin() {
+  historyFsReady = LittleFS.begin(true);   // true = format otomatis jika belum ada filesystem
+  Serial.println(historyFsReady ? "Riwayat file: LittleFS siap" : "Riwayat file: LittleFS tidak ada, pakai NVS 24 pesan");
+}
+
+static void historyFileTrim() {
+  File src = LittleFS.open(HIST_FILE, "r");
+  if (!src) return;
+  size_t size = src.size();
+  if (size <= HIST_FILE_MAX) { src.close(); return; }
+  src.seek(size / 2);
+  while (src.available()) { int c = src.read(); if (c < 0 || c == '\n') break; }   // buang baris yang terpotong
+  File dst = LittleFS.open(HIST_TMP, "w");
+  if (!dst) { src.close(); return; }
+  uint8_t buf[256];
+  while (src.available()) {
+    size_t n = src.read(buf, sizeof(buf));
+    if (n == 0) break;
+    dst.write(buf, n);
+  }
+  src.close(); dst.close();
+  LittleFS.remove(HIST_FILE);
+  LittleFS.rename(HIST_TMP, HIST_FILE);
+}
+
+void historyFileAppend(char role, const char* message) {
+  if (!historyFsReady || !message || !message[0]) return;
+  size_t len = strlen(message);
+  if (len > HIST_TEXT_MAX) {
+    len = HIST_TEXT_MAX;
+    while (len > 0 && (((unsigned char)message[len]) & 0xC0) == 0x80) --len;   // jangan potong tengah huruf UTF-8
+  }
+  char line[HIST_TEXT_MAX + 32];
+  int n = snprintf(line, sizeof(line), "%lu|%c|", (unsigned long)time(nullptr), role == 'A' ? 'A' : 'U');
+  for (size_t i = 0; i < len && n < (int)sizeof(line) - 2; ++i) {
+    char c = message[i];
+    line[n++] = (c == '\n' || c == '\r') ? ' ' : c;
+  }
+  line[n++] = '\n';
+  File f = LittleFS.open(HIST_FILE, "a");
+  if (!f) return;
+  f.write((const uint8_t*)line, (size_t)n);
+  size_t size = f.size();
+  f.close();
+  if (size > HIST_FILE_MAX) historyFileTrim();
+}
+
+// Urai satu baris file: "<epoch>|<U/A>|<teks>". Mengembalikan false jika bentuknya salah.
+bool historyParseLine(char* buf, uint32_t* ts, char* role, const char** text) {
+  char* e = nullptr;
+  unsigned long v = strtoul(buf, &e, 10);
+  if (e == buf || e[0] != '|' || (e[1] != 'U' && e[1] != 'A') || e[2] != '|') return false;
+  *ts = (uint32_t)v; *role = e[1]; *text = e + 3;
+  return true;
+}
+
+struct HistRow { uint32_t ts; char role; char text[HIST_TEXT_MAX + 4]; };
+static const int HIST_REQ_MAX = 12;
+static HistRow histRows[HIST_REQ_MAX];   // statis: tidak membebani stack
+
+// Baca pesan terakhir dari file (paling banyak 'n'). hariLalu < 0 = semua hari; 0 = hari ini; 1 = kemarin; dst.
+// Hasil ada di histRows (urut dari paling lama ke paling baru). Mengembalikan jumlahnya.
+int historyFileRead(int n, int hariLalu) {
+  if (!historyFsReady || n < 1) return 0;
+  if (n > HIST_REQ_MAX) n = HIST_REQ_MAX;
+  long targetDay = -1;
+  if (hariLalu >= 0) {
+    time_t now = time(nullptr);
+    if (now < 1700000000L) return 0;   // jam belum tersedia: tidak bisa memilih hari
+    targetDay = ((long)now + HIST_TZ_SEC) / 86400L - hariLalu;
+  }
+  File f = LittleFS.open(HIST_FILE, "r");
+  if (!f) return 0;
+  int total = 0;
+  char buf[HIST_TEXT_MAX + 40];
+  while (f.available()) {
+    size_t got = f.readBytesUntil('\n', buf, sizeof(buf) - 1);
+    buf[got] = '\0';
+    if (got == 0) continue;
+    uint32_t ts = 0; char role = 'U'; const char* text = nullptr;
+    if (!historyParseLine(buf, &ts, &role, &text)) continue;
+    if (targetDay >= 0 && ((long)ts + HIST_TZ_SEC) / 86400L != targetDay) continue;
+    HistRow& r = histRows[total % n];
+    r.ts = ts;
+    r.role = role;
+    strlcpy(r.text, text, sizeof(r.text));
+    ++total;
+  }
+  f.close();
+  int count = total < n ? total : n;
+  // Susun ulang dari paling lama ke paling baru bila cincin sudah berputar.
+  if (total > n) {
+    static HistRow tmp[HIST_REQ_MAX];
+    int start = total % n;
+    for (int i = 0; i < n; ++i) tmp[i] = histRows[(start + i) % n];
+    for (int i = 0; i < n; ++i) histRows[i] = tmp[i];
+  }
+  return count;
+}
+
+// Robot minta riwayat: HISTREQ|<n>  atau  HISTREQ|<n>|<hari_lalu>
+// Balasan lewat Serial2: HISTRES|BEGIN|<jumlah>, HISTRES|ITEM|<umur_menit atau -1>|<U/A>|<teks> (diulang), HISTRES|END
+void kirimRiwayatKeRobot(int n, int hariLalu) {
+  if (n < 1) n = 1;
+  if (n > HIST_REQ_MAX) n = HIST_REQ_MAX;
+  int count = 0;
+  if (historyFsReady) {
+    count = historyFileRead(n, hariLalu);
+  } else if (hariLalu < 0) {
+    // Cadangan: riwayat NVS lama (24 pesan).
+    count = n < (int)historyCount ? n : (int)historyCount;
+    const uint8_t first = (uint8_t)((historyNext + HISTORY_MAX_ENTRIES - count) % HISTORY_MAX_ENTRIES);
+    for (int i = 0; i < count; ++i) {
+      const HistoryEntry& e = historyEntries[(first + i) % HISTORY_MAX_ENTRIES];
+      histRows[i].ts = e.timestamp;
+      histRows[i].role = e.role;
+      strlcpy(histRows[i].text, e.text, sizeof(histRows[i].text));
+    }
+  }
+  Serial2.print("HISTRES|BEGIN|"); Serial2.println(count);
+  const uint32_t now = (uint32_t)time(nullptr);
+  for (int i = 0; i < count; ++i) {
+    const HistRow& r = histRows[i];
+    long umur = -1;
+    if (now >= 1700000000UL && r.ts >= 1700000000UL && now >= r.ts) umur = (long)((now - r.ts) / 60);
+    size_t len = strlen(r.text);
+    if (len > 180) {
+      len = 180;
+      while (len > 0 && (((unsigned char)r.text[len]) & 0xC0) == 0x80) --len;
+    }
+    char teks[184];
+    memcpy(teks, r.text, len);
+    teks[len] = '\0';
+    for (size_t k = 0; k < len; ++k) {
+      if (teks[k] == '|' || teks[k] == '\r' || teks[k] == '\n') teks[k] = ' ';
+    }
+    Serial2.print("HISTRES|ITEM|"); Serial2.print(umur); Serial2.print('|');
+    Serial2.print(r.role == 'A' ? 'A' : 'U'); Serial2.print('|');
+    Serial2.println(teks);
+  }
+  Serial2.println("HISTRES|END");
+}
+
 String historyEscapeHtml(const char* value) {
   String out; if (!value) return out;
   for (const char* p = value; *p; ++p) {
@@ -430,6 +589,7 @@ void prosesJadwalOLED(time_t sekarang) {
 // SERIAL2
 // =====================================================
 void eksekusiTeksPerintah(String cmd);
+bool robotTerimaLaporan(const String& cmd);
 
 void prosesSerial2() {
   while (Serial2.available()) {
@@ -465,8 +625,16 @@ void prosesSerial2() {
 void eksekusiTeksPerintah(String cmd) {
   cmd.trim();
   if (cmd.length() == 0) return;
+  if (robotTerimaLaporan(cmd)) return;
   if (cmd.startsWith("HISTU:")) { historyAppend('U', cmd.substring(6).c_str()); return; }
   if (cmd.startsWith("HISTA:")) { historyAppend('A', cmd.substring(6).c_str()); return; }
+  if (cmd.startsWith("HISTREQ|")) {
+    String rest = cmd.substring(8);
+    int sep = rest.indexOf('|');
+    int hari = (sep >= 0) ? (int)rest.substring(sep + 1).toInt() : -1;
+    kirimRiwayatKeRobot((int)rest.toInt(), hari);
+    return;
+  }
 
   bool dikenali = true;
 
@@ -573,6 +741,7 @@ String halamanWeb() {
   h += "</head><body><div class='remote'>";
   h += "<h3>OTAK WEB PEMANCAR</h3>";
   h += "<a href='/history' style='display:block;background:#2563eb;color:white;padding:12px;border-radius:10px;text-decoration:none;margin:10px 0 8px'>RIWAYAT PERCAKAPAN ROBOT</a>";
+  h += "<a href='/robot' style='display:block;background:#7c3aed;color:white;padding:12px;border-radius:10px;text-decoration:none;margin:8px 0'>KESEHATAN ROBOT</a>";
   h += "<a href='/search' style='display:block;background:#047857;color:white;padding:12px;border-radius:10px;text-decoration:none;margin:8px 0 18px'>HASIL PENCARIAN WEB</a>";
 
   String txtLdr = (analogRead(PIN_LDR) > 100) ? "MENYALA" : "MATI";
@@ -667,6 +836,7 @@ void handleHistory() {
     }
   } else {
     h += "<a class='back' href='/'>← Kembali ke kontrol</a><h2>Riwayat Percakapan Robot</h2>";
+    h += "<a class='back' href='/history_all'>Riwayat lengkap (file, ratusan pesan)</a>";
     h += "<p>" + String(count) + " sesi terdeteksi · " + String(historyCount) + " pesan tersimpan.</p>";
     if (count == 0) h += "<div class='item'>Belum ada riwayat. Ucapkan sesuatu kepada robot setelah koneksi UART aktif.</div>";
     for (int g = (int)count - 1; g >= 0; --g) {
@@ -680,6 +850,363 @@ void handleHistory() {
     }
   }
   h += "</div></body></html>"; server.send(200, "text/html; charset=utf-8", h);
+}
+
+// =====================================================
+// KESEHATAN ROBOT (halaman /robot)
+// Robot mengirim: STAT|<versi>|<uptime_s>|<rssi>|<kanal>|<ram>|<ram_min>|<psram>|<ws>|<putus>
+//                 EVT|<jenis>|<rssi>|<ram>|<ws>
+// =====================================================
+static const char* ROBOT_EVT_FILE = "/robot_evt.log";
+static const char* ROBOT_EVT_TMP = "/robot_evt.tmp";
+static const size_t ROBOT_EVT_MAX = 16 * 1024;
+static const int ROBOT_SAMPLE_MAX = 60;
+
+struct RobotSample { uint32_t ts; int8_t rssi; uint16_t ramKb; };
+static RobotSample robotSamples[ROBOT_SAMPLE_MAX];
+static int robotSampleCount = 0, robotSampleNext = 0;
+static char robotVer[24] = "";
+static uint32_t robotUptime = 0, robotRam = 0, robotRamMin = 0, robotPsram = 0, robotDrops = 0;
+static int robotRssi = 0, robotChan = 0, robotWs = 0;
+static uint32_t robotLastMs = 0;     // millis() saat laporan terakhir masuk
+static bool robotEverReported = false;
+
+static int robotSplit(char* s, char** f, int maxf) {
+  int n = 0; f[n++] = s;
+  for (char* p = s; *p && n < maxf; ++p) { if (*p == '|') { *p = '\0'; f[n++] = p + 1; } }
+  return n;
+}
+
+static void robotEvtTrim() {
+  File src = LittleFS.open(ROBOT_EVT_FILE, "r");
+  if (!src) return;
+  size_t size = src.size();
+  if (size <= ROBOT_EVT_MAX) { src.close(); return; }
+  src.seek(size / 2);
+  while (src.available()) { int c = src.read(); if (c < 0 || c == '\n') break; }
+  File dst = LittleFS.open(ROBOT_EVT_TMP, "w");
+  if (!dst) { src.close(); return; }
+  uint8_t buf[256];
+  while (src.available()) { size_t n = src.read(buf, sizeof(buf)); if (n == 0) break; dst.write(buf, n); }
+  src.close(); dst.close();
+  LittleFS.remove(ROBOT_EVT_FILE);
+  LittleFS.rename(ROBOT_EVT_TMP, ROBOT_EVT_FILE);
+}
+
+static void robotEvtAppend(const char* kind, int rssi, uint32_t ram, int ws, const char* detail) {
+  if (!historyFsReady) return;
+  char line[160];
+  int n = snprintf(line, sizeof(line), "%lu|%s|%d|%lu|%d|%s\n", (unsigned long)time(nullptr), kind, rssi, (unsigned long)ram, ws, detail ? detail : "");
+  if (n <= 0 || n >= (int)sizeof(line)) return;
+  File f = LittleFS.open(ROBOT_EVT_FILE, "a");
+  if (!f) return;
+  f.write((const uint8_t*)line, (size_t)n);
+  size_t size = f.size();
+  f.close();
+  if (size > ROBOT_EVT_MAX) robotEvtTrim();
+}
+
+// Dipanggil dari eksekusiTeksPerintah. Mengembalikan true jika baris itu laporan robot.
+bool robotTerimaLaporan(const String& cmd) {
+  bool isStat = cmd.startsWith("STAT|");
+  bool isEvt = cmd.startsWith("EVT|");
+  if (!isStat && !isEvt) return false;
+  char buf[200];
+  size_t len = cmd.length(); if (len >= sizeof(buf)) return true;   // terlalu panjang: abaikan
+  memcpy(buf, cmd.c_str(), len + 1);
+  char* f[12]; int n = robotSplit(buf, f, 12);
+  if (isStat && n >= 10) {
+    strncpy(robotVer, f[1], sizeof(robotVer) - 1); robotVer[sizeof(robotVer) - 1] = '\0';
+    robotUptime = strtoul(f[2], nullptr, 10); robotRssi = atoi(f[3]); robotChan = atoi(f[4]);
+    robotRam = strtoul(f[5], nullptr, 10); robotRamMin = strtoul(f[6], nullptr, 10); robotPsram = strtoul(f[7], nullptr, 10);
+    robotWs = atoi(f[8]); robotDrops = strtoul(f[9], nullptr, 10);
+    robotLastMs = millis(); robotEverReported = true;
+    robotSamples[robotSampleNext].ts = (uint32_t)time(nullptr);
+    robotSamples[robotSampleNext].rssi = (int8_t)constrain(robotRssi, -127, 0);
+    robotSamples[robotSampleNext].ramKb = (uint16_t)min((uint32_t)65535, robotRam / 1024);
+    robotSampleNext = (robotSampleNext + 1) % ROBOT_SAMPLE_MAX;
+    if (robotSampleCount < ROBOT_SAMPLE_MAX) ++robotSampleCount;
+  } else if (isEvt && n >= 5) {
+    robotEvtAppend(f[1], atoi(f[2]), strtoul(f[3], nullptr, 10), atoi(f[4]), n >= 6 ? f[5] : "");
+  }
+  return true;
+}
+
+static const char* robotRssiLabel(int r) {
+  if (r == 0) return "tidak tersambung";
+  if (r >= -55) return "bagus";
+  if (r >= -67) return "cukup";
+  if (r >= -75) return "lemah";
+  return "sangat lemah";
+}
+
+static const char* robotKindText(const char* k) {
+  if (!strcmp(k, "gemini_putus")) return "Gemini putus";
+  if (!strcmp(k, "wifi_putus")) return "Wi-Fi putus";
+  if (!strcmp(k, "restart_macet")) return "Restart (macet)";
+  if (!strcmp(k, "boot_listrik")) return "Nyala (listrik)";
+  if (!strcmp(k, "boot_restart")) return "Nyala (restart)";
+  if (!strcmp(k, "boot_crash")) return "Nyala (CRASH)";
+  if (!strcmp(k, "boot_wdt")) return "Nyala (watchdog)";
+  if (!strcmp(k, "boot_brownout")) return "Nyala (listrik drop)";
+  return k;
+}
+
+static int robotSplit2(char* s, char** f, int maxf) {
+  int n = 0; f[n++] = s;
+  for (char* p = s; *p && n < maxf; ++p) { if (*p == ':') { *p = '\0'; f[n++] = p + 1; } }
+  return n;
+}
+
+static String robotMenit(long d) {
+  if (d < 60) return String(d) + " dtk";
+  return String(d / 60) + " mnt " + String(d % 60) + " dtk";
+}
+
+static String robotWifiAlasan(int r) {
+  switch (r) {
+    case 1: return "tidak diketahui";
+    case 2: return "sesi kedaluwarsa";
+    case 3: return "diputus AP (deauth)";
+    case 4: return "asosiasi kedaluwarsa";
+    case 8: return "diputus AP (disassoc)";
+    case 15: return "jabat tangan gagal";
+    case 200: return "sinyal hilang (beacon timeout)";
+    case 201: return "AP tidak ditemukan";
+    case 202: return "gagal autentikasi";
+    case 205: return "koneksi gagal";
+    default: return String("kode ") + String(r);
+  }
+}
+
+// Ubah keterangan mentah dari robot menjadi kalimat. Gemini: "<sumber>:<errno>:<kode tutup>:<sesi detik>:<aktivitas>"
+static String robotDetailText(const char* kind, const char* detail) {
+  if (!detail || !detail[0]) return String("");
+  if (!strcmp(kind, "wifi_putus") && detail[0] == 'r') return String("Alasan: ") + robotWifiAlasan(atoi(detail + 1));
+  if (strcmp(kind, "gemini_putus")) return String("");
+  char tmp[48]; strncpy(tmp, detail, sizeof(tmp) - 1); tmp[sizeof(tmp) - 1] = '\0';
+  char* f[5]; int n = robotSplit2(tmp, f, 5);
+  if (n < 5) return String("");
+  String o;
+  if (!strcmp(f[0], "err")) o += "error jaringan"; else if (!strcmp(f[0], "dc")) o += "terputus"; else if (!strcmp(f[0], "cl")) o += "ditutup"; else o += f[0];
+  int en = atoi(f[1]);
+  if (en == 104) o += ", di-reset (jaringan/server)"; else if (en == 110) o += ", timeout"; else if (en == 113) o += ", tidak ada rute"; else if (en != 0) o += String(", errno ") + String(en);
+  int cc = atoi(f[2]);
+  if (cc == 1008) o += ", ditolak server (1008)"; else if (cc == 1011) o += ", error server/kuota (1011)"; else if (cc == 1006) o += ", putus tak normal (1006)"; else if (cc != 0) o += String(", kode tutup ") + String(cc);
+  o += String("; sesi bertahan ") + robotMenit(atol(f[3])) + "; saat " + f[4];
+  return o;
+}
+
+struct RobotEvtRow { uint32_t ts; int rssi; uint32_t ram; char kind[20]; char detail[48]; };
+static RobotEvtRow robotEvtRows[30];
+
+void handleRobot() {
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/html; charset=utf-8", "");
+  server.sendContent("<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><meta http-equiv='refresh' content='30'>"
+    "<style>body{margin:0;padding:16px;background:#111318;color:#e7e9ef;font:16px Arial,sans-serif}.wrap{max-width:760px;margin:auto}"
+    ".box{background:#20232b;border:1px solid #343844;border-radius:12px;padding:14px;margin:10px 0}"
+    ".row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #2c303a}.row:last-child{border:0}"
+    ".ok{color:#34d399}.bad{color:#f87171}.mid{color:#fbbf24}.small{font-size:12px;color:#9ca3af}"
+    ".back{display:block;color:#fff;background:#343844;padding:12px;border-radius:9px;text-decoration:none;margin:10px 0}"
+    "</style></head><body><div class='wrap'><a class='back' href='/'>← Kembali</a><h2>Kesehatan Robot</h2>");
+
+  String h;
+  uint32_t age = (millis() - robotLastMs) / 1000UL;
+  if (!robotEverReported) {
+    h += "<div class='box bad'>Belum ada laporan dari robot. Pastikan robot sudah diperbarui dan menyala (laporan datang tiap 1 menit).</div>";
+  } else {
+    bool fresh = age <= 150;
+    h += String("<div class='box'><b class='") + (fresh ? "ok'>ROBOT HIDUP" : "bad'>TIDAK ADA LAPORAN") + "</b><div class='small'>Laporan terakhir " + String(age) + " detik lalu</div></div>";
+    h += "<div class='box'>";
+    h += String("<div class='row'><span>Versi program</span><span>") + historyEscapeHtml(robotVer) + "</span></div>";
+    uint32_t u = robotUptime;
+    h += String("<div class='row'><span>Menyala sejak</span><span>") + String(u / 3600) + " jam " + String((u / 60) % 60) + " menit</span></div>";
+    const char* rc = robotRssi >= -67 ? "ok" : (robotRssi >= -75 ? "mid" : "bad");
+    h += String("<div class='row'><span>Sinyal Wi-Fi</span><span class='") + rc + "'>" + String(robotRssi) + " dBm (" + robotRssiLabel(robotRssi) + "), kanal " + String(robotChan) + "</span></div>";
+    h += String("<div class='row'><span>Gemini</span><span class='") + (robotWs ? "ok'>tersambung" : "mid'>tidak tersambung") + "</span></div>";
+    h += String("<div class='row'><span>Gemini putus sejak nyala</span><span>") + String(robotDrops) + " kali</span></div>";
+    const char* mc = robotRamMin < 20000 ? "bad" : (robotRamMin < 40000 ? "mid" : "ok");
+    h += String("<div class='row'><span>Memori cepat (bebas)</span><span>") + String(robotRam / 1024) + " KB</span></div>";
+    h += String("<div class='row'><span>Memori cepat (terendah)</span><span class='") + mc + "'>" + String(robotRamMin / 1024) + " KB</span></div>";
+    h += String("<div class='row'><span>Memori besar (PSRAM)</span><span>") + String(robotPsram / 1024) + " KB</span></div>";
+    h += "</div>";
+  }
+  server.sendContent(h); h = "";
+
+  // Grafik sinyal (SVG): paling lama di kiri, -90 dBm di bawah, -30 dBm di atas
+  if (robotSampleCount >= 2) {
+    h += "<div class='box'><b>Sinyal Wi-Fi (" + String(robotSampleCount) + " laporan terakhir)</b><svg viewBox='0 0 300 80' width='100%' height='90' style='margin-top:8px'>";
+    h += "<rect x='0' y='0' width='300' height='80' fill='#181b22'/>";
+    h += "<line x1='0' y1='40' x2='300' y2='40' stroke='#2c303a'/><text x='3' y='11' fill='#6b7280' font-size='9'>-30</text><text x='3' y='77' fill='#6b7280' font-size='9'>-90</text>";
+    h += "<polyline fill='none' stroke='#60a5fa' stroke-width='2' points='";
+    int first = (robotSampleCount < ROBOT_SAMPLE_MAX) ? 0 : robotSampleNext;
+    for (int i = 0; i < robotSampleCount; ++i) {
+      const RobotSample& s = robotSamples[(first + i) % ROBOT_SAMPLE_MAX];
+      int r = s.rssi; if (r == 0) r = -90;
+      float y = 80.0f - (constrain(r, -90, -30) + 90) * (80.0f / 60.0f);
+      float x = (float)i * 300.0f / (float)(robotSampleCount - 1);
+      h += String(x, 1) + "," + String(y, 1) + " ";
+    }
+    h += "'/></svg></div>";
+    // Tren memori cepat: kalau garis turun terus dari jam ke jam = ada kebocoran memori
+    uint16_t rmax = 1; int first2 = (robotSampleCount < ROBOT_SAMPLE_MAX) ? 0 : robotSampleNext;
+    for (int i = 0; i < robotSampleCount; ++i) { uint16_t v = robotSamples[(first2 + i) % ROBOT_SAMPLE_MAX].ramKb; if (v > rmax) rmax = v; }
+    h += "<div class='box'><b>Memori cepat bebas (KB)</b><svg viewBox='0 0 300 80' width='100%' height='90' style='margin-top:8px'><rect width='300' height='80' fill='#181b22'/>";
+    h += "<text x='3' y='11' fill='#6b7280' font-size='9'>" + String(rmax) + "</text><text x='3' y='77' fill='#6b7280' font-size='9'>0</text>";
+    h += "<polyline fill='none' stroke='#34d399' stroke-width='2' points='";
+    for (int i = 0; i < robotSampleCount; ++i) {
+      uint16_t v = robotSamples[(first2 + i) % ROBOT_SAMPLE_MAX].ramKb;
+      float y = 80.0f - (float)v * 78.0f / (float)rmax;
+      float x = (float)i * 300.0f / (float)(robotSampleCount - 1);
+      h += String(x, 1) + "," + String(y, 1) + " ";
+    }
+    h += "'/></svg></div>";
+    server.sendContent(h); h = "";
+  }
+
+  // Kejadian dari file: hitung 24 jam terakhir + 30 terbaru
+  if (!historyFsReady) {
+    server.sendContent("<div class='box small'>Penyimpanan file tidak tersedia, kejadian tidak bisa dicatat.</div>");
+  } else {
+    int cnt = 0, next = 0, gem24 = 0, wifi24 = 0, boot24 = 0;
+    int act[4] = {0, 0, 0, 0};            // bicara, mikir, tidur, lain
+    long sesiSum = 0, sesiMin = -1; int sesiN = 0;
+    int perHour[24]; for (int i = 0; i < 24; ++i) perHour[i] = 0;
+    time_t now = time(nullptr); bool timeOk = now >= 1700000000L;
+    char line[160];
+    File f = LittleFS.open(ROBOT_EVT_FILE, "r");
+    if (f) {
+      while (f.available()) {
+        size_t g = f.readBytesUntil('\n', line, sizeof(line) - 1); line[g] = '\0';
+        if (g < 6) continue;
+        char* fld[7]; int nf = robotSplit(line, fld, 7);
+        if (nf < 5) continue;
+        RobotEvtRow& r = robotEvtRows[next];
+        r.ts = strtoul(fld[0], nullptr, 10); r.rssi = atoi(fld[2]); r.ram = strtoul(fld[3], nullptr, 10);
+        strncpy(r.kind, fld[1], sizeof(r.kind) - 1); r.kind[sizeof(r.kind) - 1] = '\0';
+        strncpy(r.detail, nf >= 6 ? fld[5] : "", sizeof(r.detail) - 1); r.detail[sizeof(r.detail) - 1] = '\0';
+        next = (next + 1) % 30; if (cnt < 30) ++cnt;
+        if (timeOk && r.ts >= 1700000000UL && (uint32_t)now >= r.ts && (uint32_t)now - r.ts < 86400UL) {
+          if (!strcmp(r.kind, "gemini_putus")) {
+            ++gem24; ++perHour[((uint32_t)now - r.ts) / 3600];
+            char tmp[48]; strncpy(tmp, r.detail, sizeof(tmp) - 1); tmp[sizeof(tmp) - 1] = '\0';
+            char* d[5]; if (robotSplit2(tmp, d, 5) >= 5) {
+              long sd = atol(d[3]); ++sesiN; sesiSum += sd; if (sesiMin < 0 || sd < sesiMin) sesiMin = sd;
+              if (!strcmp(d[4], "bicara")) ++act[0]; else if (!strcmp(d[4], "mikir")) ++act[1]; else if (!strcmp(d[4], "tidur")) ++act[2]; else ++act[3];
+            }
+          }
+          else if (!strcmp(r.kind, "wifi_putus")) ++wifi24;
+          else if (!strncmp(r.kind, "boot_", 5) || !strcmp(r.kind, "restart_macet")) ++boot24;
+        }
+      }
+      f.close();
+    }
+    h += "<div class='box'><b>24 jam terakhir</b>";
+    if (!timeOk) h += "<div class='small'>Jam DevKit belum tersedia, hitungan belum bisa.</div>";
+    else {
+      h += "<div class='row'><span>Gemini putus</span><span class='" + String(gem24 > 10 ? "bad" : (gem24 > 3 ? "mid" : "ok")) + "'>" + String(gem24) + " kali</span></div>";
+      h += "<div class='row'><span>Wi-Fi putus</span><span class='" + String(wifi24 > 3 ? "bad" : "ok") + "'>" + String(wifi24) + " kali</span></div>";
+      h += "<div class='row'><span>Robot nyala ulang / restart</span><span class='" + String(boot24 > 2 ? "mid" : "ok") + "'>" + String(boot24) + " kali</span></div>";
+      if (sesiN > 0) {
+        h += "<div class='row'><span>Sesi Gemini bertahan (rata-rata)</span><span>" + robotMenit(sesiSum / sesiN) + "</span></div>";
+        h += "<div class='row'><span>Sesi terpendek sebelum putus</span><span>" + robotMenit(sesiMin) + "</span></div>";
+        h += "<div class='row'><span>Gemini putus saat</span><span class='small'>bicara " + String(act[0]) + " · mikir " + String(act[1]) + " · tidur " + String(act[2]) + " · lain " + String(act[3]) + "</span></div>";
+      }
+      int mx = 1; for (int i = 0; i < 24; ++i) if (perHour[i] > mx) mx = perHour[i];
+      h += "<div class='small' style='margin-top:8px'>Gemini putus per jam (kiri = 24 jam lalu, kanan = sekarang)</div><svg viewBox='0 0 240 40' width='100%' height='50'><rect width='240' height='40' fill='#181b22'/>";
+      for (int i = 0; i < 24; ++i) {
+        int v = perHour[23 - i];
+        if (v > 0) { int bh = 4 + (v * 32) / mx; h += "<rect x='" + String(i * 10 + 1) + "' y='" + String(40 - bh) + "' width='8' height='" + String(bh) + "' fill='#f87171'/>"; }
+      }
+      h += "</svg>";
+    }
+    h += "</div>";
+    server.sendContent(h); h = "";
+
+    h += "<div class='box'><b>Kejadian terakhir</b>";
+    if (cnt == 0) h += "<div class='small'>Belum ada kejadian tercatat.</div>";
+    int start = (cnt < 30) ? 0 : next;
+    for (int i = cnt - 1; i >= 0; --i) {
+      const RobotEvtRow& r = robotEvtRows[(start + i) % 30];
+      bool bad = !strcmp(r.kind, "boot_crash") || !strcmp(r.kind, "boot_brownout") || !strcmp(r.kind, "restart_macet");
+      h += "<div class='row'><span class='" + String(bad ? "bad" : "") + "'>" + robotKindText(r.kind) + "<div class='small'>" + historyFormatTime(r.ts) + "</div><div class='small'>" + historyEscapeHtml(robotDetailText(r.kind, r.detail).c_str()) + "</div></span><span class='small'>" + String(r.rssi) + " dBm · " + String(r.ram / 1024) + " KB</span></div>";
+      if (h.length() > 1500) { server.sendContent(h); h = ""; }
+    }
+    h += "</div>";
+  }
+  h += "<a class='back' style='background:#7f1d1d' href='/robot_clear' onclick=\"return confirm('Hapus semua catatan kejadian robot?')\">Hapus catatan kejadian</a>";
+  h += "</div></body></html>";
+  server.sendContent(h);
+  server.sendContent("");
+}
+
+void handleRobotClear() {
+  if (historyFsReady) { LittleFS.remove(ROBOT_EVT_FILE); LittleFS.remove(ROBOT_EVT_TMP); }
+  server.sendHeader("Location", "/robot");
+  server.send(303, "text/plain", "");
+}
+
+// Halaman riwayat lengkap dari file (150 pesan terakhir, paling lama di atas) + tombol hapus.
+void handleHistoryAll() {
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/html; charset=utf-8", "");
+  server.sendContent("<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<style>body{margin:0;padding:16px;background:#111318;color:#e7e9ef;font:16px Arial,sans-serif}.wrap{max-width:760px;margin:auto}"
+    ".item{background:#20232b;border:1px solid #343844;border-radius:12px;padding:14px;margin:10px 0;white-space:pre-wrap;overflow-wrap:anywhere}"
+    ".u{border-left:4px solid #60a5fa}.a{border-left:4px solid #34d399}.meta{font-size:12px;color:#9ca3af;margin-bottom:8px}"
+    ".back{display:block;color:#fff;background:#343844;padding:12px;border-radius:9px;text-decoration:none;margin:10px 0}"
+    ".del{background:#7f1d1d}</style></head><body><div class='wrap'>"
+    "<a class='back' href='/history'>← Riwayat per sesi</a><h2>Riwayat Lengkap (file)</h2>");
+  if (!historyFsReady) {
+    server.sendContent("<div class='item'>Penyimpanan file tidak tersedia di DevKit ini (skema partisi tanpa SPIFFS/LittleFS). Hanya riwayat 24 pesan yang aktif.</div>");
+  } else {
+    char buf[HIST_TEXT_MAX + 40];
+    int totalLines = 0;
+    File f = LittleFS.open(HIST_FILE, "r");
+    if (f) {
+      while (f.available()) { size_t g = f.readBytesUntil('\n', buf, sizeof(buf) - 1); if (g > 0) ++totalLines; }
+      f.seek(0);
+      const int skip = totalLines > 150 ? totalLines - 150 : 0;
+      server.sendContent("<p>" + String(totalLines) + " pesan tersimpan di file. Menampilkan " + String(totalLines - skip) + " terakhir.</p>");
+      int idx = 0;
+      while (f.available()) {
+        size_t g = f.readBytesUntil('\n', buf, sizeof(buf) - 1);
+        buf[g] = '\0';
+        if (g == 0) continue;
+        if (idx++ < skip) continue;
+        uint32_t ts = 0; char role = 'U'; const char* text = nullptr;
+        if (!historyParseLine(buf, &ts, &role, &text)) continue;
+        String item = String("<div class='item ") + (role == 'U' ? "u" : "a") + "'><div class='meta'>" +
+                      (role == 'U' ? "PENGGUNA" : "GEMINI") + " · " + historyFormatTime(ts) + "</div>" +
+                      historyEscapeHtml(text) + "</div>";
+        server.sendContent(item);
+      }
+      f.close();
+    } else {
+      server.sendContent("<div class='item'>Belum ada riwayat di file.</div>");
+    }
+  }
+  server.sendContent("<a class='back del' href='/history_clear' onclick=\"return confirm('Hapus SEMUA riwayat percakapan?')\">Hapus semua riwayat</a>"
+                     "</div></body></html>");
+  server.sendContent("");
+}
+
+// Hapus semua riwayat: file dan riwayat NVS lama.
+void handleHistoryClear() {
+  if (historyFsReady) LittleFS.remove(HIST_FILE);
+  if (historyPrefsReady) {
+    historyCount = 0; historyNext = 0;
+    memset(historyEntries, 0, sizeof(historyEntries));
+    historyPrefs.putUInt("count", 0); historyPrefs.putUInt("next", 0);
+    for (uint8_t i = 0; i < HISTORY_MAX_ENTRIES; ++i) {
+      char key[5]; snprintf(key, sizeof(key), "h%02u", i);
+      historyPrefs.remove(key);
+    }
+  }
+  statusSistem = "Riwayat dihapus";
+  server.sendHeader("Location", "/history_all");
+  server.send(303, "text/plain", "");
 }
 
 void handleUpdateData() {
@@ -882,8 +1409,13 @@ void setup() {
 
   konfigurasiNTP();
   historyLoad();
+  historyFsBegin();
 
   server.on("/history", handleHistory);
+  server.on("/history_all", handleHistoryAll);
+  server.on("/history_clear", handleHistoryClear);
+  server.on("/robot", handleRobot);
+  server.on("/robot_clear", handleRobotClear);
   server.on("/search", handleWebSearchPage);
   server.on("/search_data", handleWebSearchData);
   server.on("/search_status", handleWebSearchStatus);
