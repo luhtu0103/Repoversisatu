@@ -307,3 +307,32 @@ bool websocket_send_radio_ended(const char *station, int reason)
     ESP_LOGI(TAG, "Catatan radio selesai masuk antrean TX: %s (alasan=%d)", safe, reason);
     return true;
 }
+
+/* Sudah lama tidak ada yang bicara: Gemini diminta pamit singkat (boleh bertanya sekilas), lalu robot kembali standby. */
+bool websocket_send_idle_goodbye(void)
+{
+    if (!websocket_is_connected() || !websocket_tx_queue) return false;
+    static const char json[] =
+        "{\"clientContent\":{\"turns\":[{\"role\":\"user\",\"parts\":[{\"text\":"
+        "\"[Sistem] Sudah sekitar 30 detik tidak ada yang berbicara kepadamu. "
+        "Ucapkan satu kalimat pendek yang hangat: boleh bertanya sekilas apakah masih ada yang dibutuhkan, "
+        "lalu pamit bahwa kamu istirahat dulu dan bisa dipanggil lagi dengan Hi ESP. "
+        "Jangan menjalankan tool apa pun. Bahasa Indonesia.\"}]}],\"turnComplete\":true}}";
+    const size_t n = sizeof(json) - 1;
+    uint8_t *copy = (uint8_t *)malloc(n);
+    if (!copy) return false;
+    memcpy(copy, json, n);
+    ws_tx_command_t cmd = {};
+    cmd.type = WS_TX_COMMAND_TEXT;
+    cmd.generation = websocket_connection_generation;
+    cmd.len = (uint16_t)n;
+    cmd.data = copy;
+    if (xQueueSend(websocket_tx_queue, &cmd, 0) != pdTRUE) {
+        websocket_set_backpressured(true);
+        free(copy);
+        ESP_LOGW(TAG, "Pamit sepi ditahan: TX queue penuh");
+        return false;
+    }
+    ESP_LOGI(TAG, "Pamit karena sepi 30 detik masuk antrean TX");
+    return true;
+}
