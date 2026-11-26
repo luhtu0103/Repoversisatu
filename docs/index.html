@@ -2,87 +2,114 @@
 <html lang="id">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Kontrol Robot</title>
 <style>
-  :root{--bg:#111318;--card:#20232b;--line:#343844;--text:#e7e9ef;--mute:#9ca3af;--blue:#2563eb;--green:#34d399;--red:#f87171;--amber:#fbbf24}
-  @media (prefers-color-scheme: light){:root{--bg:#f3f4f6;--card:#fff;--line:#d1d5db;--text:#111827;--mute:#6b7280}}
-  *{box-sizing:border-box}
-  body{margin:0;padding:16px;background:var(--bg);color:var(--text);font:16px/1.4 system-ui,Arial,sans-serif}
-  .wrap{max-width:560px;margin:auto}
-  h1{font-size:22px;margin:4px 0 12px}
-  h2{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);margin:18px 0 8px}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:10px 0}
-  .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-  button{font:inherit;font-weight:600;padding:14px 8px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--text);cursor:pointer}
-  button:active{transform:scale(.98)}
-  .on{background:#065f46;border-color:#065f46;color:#fff}
-  .off{background:#7f1d1d;border-color:#7f1d1d;color:#fff}
-  .blue{background:var(--blue);border-color:var(--blue);color:#fff}
-  button:disabled{opacity:.45;cursor:not-allowed}
-  input{width:100%;padding:12px;margin:6px 0;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit}
-  pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:14px/1.5 ui-monospace,Menlo,monospace}
-  .small{font-size:12px;color:var(--mute)}
-  .ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}
-  .top{display:flex;justify-content:space-between;align-items:center}
-  .top button{padding:8px 12px;font-size:14px}
-  #msg{min-height:22px}
+  body{font-family:sans-serif;text-align:center;background:#1e1e24;color:#f0f0f5;padding:10px;margin:0;}
+  .remote{max-width:320px;margin:20px auto;background:#0d0d11;padding:25px 20px;border-radius:45px;
+    box-shadow:inset 0 2px 4px rgba(255,255,255,.1),0 12px 35px rgba(0,0,0,.7);border:4px solid #25252b;}
+  h3{margin:15px 0 5px;color:#8e92a3;font-size:12px;letter-spacing:1px;text-transform:uppercase;}
+  .lcd{font-size:11px;font-family:monospace;background:#232b28;color:#5af78e;padding:8px;border-radius:6px;margin-bottom:20px;text-align:left;white-space:pre-wrap;overflow-wrap:anywhere;}
+  .line{border-top:2px dashed #22222b;margin:15px 0;}
+  .grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
+  .grid-2{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;}
+  button{font-family:inherit;cursor:pointer;-webkit-tap-highlight-color:transparent;}
+  .btn-tv{display:block;padding:12px 0;font-size:12px;font-weight:bold;border-radius:12px;
+    background:linear-gradient(180deg,#32323a,#1f1f24);border:1px solid #141417;color:#e1e1e6;width:100%;}
+  .btn-relay{padding:14px 0;font-size:13px;border-radius:10px;color:#fff;font-weight:bold;border:0;width:100%;}
+  .btn-num{background:linear-gradient(180deg,#2b2b33,#1a1a20);border-radius:50%;width:52px;height:52px;line-height:52px;padding:0;font-size:16px;margin:auto;}
+  button:active{transform:scale(.97)}
+  .info{font-size:10px;color:#9ca3af;margin-top:8px;}
+  .panel{max-width:320px;margin:14px auto;background:#0d0d11;border:1px solid #25252b;border-radius:16px;padding:12px;text-align:left;}
+  .panel h3{margin:0 0 6px}
+  pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 monospace;color:#d1d5db}
+  .setup{max-width:320px;margin:10px auto;background:#0d0d11;border:1px solid #25252b;border-radius:16px;padding:12px;text-align:left}
+  input{width:100%;box-sizing:border-box;padding:10px;margin:5px 0;border-radius:8px;border:1px solid #343844;background:#181b22;color:#fff;font-size:14px}
+  .top{max-width:320px;margin:6px auto;display:flex;justify-content:space-between;align-items:center}
+  .top button{padding:6px 12px;font-size:12px;border-radius:8px;border:1px solid #343844;background:#25252b;color:#e1e1e6}
+  .ok{color:#34d399}.bad{color:#f87171}.warn{color:#fbbf24}
 </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="top"><h1>Kontrol Robot</h1><button id="btnSet" type="button">Atur</button></div>
+<div class="top"><span style="font-size:13px;color:#8e92a3">KONTROL ROBOT</span><button id="btnSet" type="button">Atur</button></div>
 
-  <div class="card" id="setup" hidden>
-    <div class="small">Isi sekali saja. Disimpan hanya di HP ini, tidak di GitHub.</div>
-    <input id="inUrl" type="url" placeholder="Alamat database Firebase (https://...firebasedatabase.app)" autocomplete="off">
-    <input id="inKey" type="password" placeholder="Kunci rahasia dari halaman DevKit /remote" autocomplete="off">
-    <button class="blue" id="btnSave" type="button" style="width:100%">Simpan</button>
-  </div>
-
-  <div class="card">
-    <div id="conn" class="small">Belum diatur.</div>
-    <div id="msg" class="small"></div>
-  </div>
-
-  <h2>Rumah</h2>
-  <div class="grid" id="ctl"></div>
-
-  <h2>Robot bicara</h2>
-  <div class="card">
-    <input id="inSay" type="text" placeholder="Ketik kalimat untuk diucapkan robot" disabled>
-    <button type="button" disabled style="width:100%">Ucapkan (menyusul, butuh pembaruan robot)</button>
-  </div>
-
-  <h2>Kondisi</h2>
-  <div class="card"><pre id="kond">-</pre><div class="small" id="age"></div></div>
-  <h2>Status relay</h2>
-  <div class="card"><pre id="stat">-</pre></div>
-  <h2>Pemberitahuan</h2>
-  <div class="card"><pre id="alrt">-</pre></div>
+<div class="setup" id="setup" hidden>
+  <div style="font-size:11px;color:#9ca3af">Isi sekali saja. Disimpan hanya di HP ini, tidak di GitHub.</div>
+  <input id="inUrl" type="url" placeholder="Alamat database Firebase (https://...firebasedatabase.app)" autocomplete="off">
+  <input id="inKey" type="password" placeholder="Kunci rahasia dari halaman DevKit /remote" autocomplete="off">
+  <button class="btn-relay" id="btnSave" type="button" style="background:#2563eb">Simpan</button>
 </div>
+
+<div class="remote">
+  <h3>OTAK WEB PEMANCAR</h3>
+  <div class="lcd" id="lcd">TIME : --:--:--
+SUHU : -- C
+LAMPU: --
+STAT : Belum diatur</div>
+
+  <h3>CONTROL RELAY FISIK ESP32</h3>
+  <div class="grid-2">
+    <button class="btn-relay" id="b_r1" data-cmd="/r1" style="background:#6b7280">colokan: ?</button>
+    <button class="btn-relay" id="b_r2" data-cmd="/r2" style="background:#6b7280">colokan panjang: ?</button>
+    <button class="btn-relay" id="b_r3" data-cmd="/r3" style="background:#6b7280">saklar lampu: ?</button>
+    <button class="btn-relay" id="b_r4" data-cmd="/r4" style="background:#ef4444">mp3 player: OFF</button>
+  </div>
+  <div class="info">? = status relay belum diketahui setelah restart</div>
+
+  <div class="line"></div><h3>KONTROL JAM BONEKA MOCHI</h3>
+  <div class="grid-2">
+    <button class="btn-relay" data-cmd="/mochi_led" style="background:#6366f1">FORCED LED</button>
+    <button class="btn-relay" data-cmd="/mochi_mute" style="background:#6366f1">MUTE BUZZER</button>
+    <button class="btn-relay" data-cmd="/mochi_musik" style="background:#ca8a04">PUTAR MUSIK</button>
+    <button class="btn-relay" data-cmd="/mochi_cek" style="background:#4d7c0f">TES HARDWARE</button>
+  </div>
+
+  <div class="line"></div><h3>AUDIO PLAYER</h3>
+  <div class="grid-3">
+    <button class="btn-tv" data-cmd="/mp3_mode">MODE</button>
+    <button class="btn-tv" data-cmd="/mp3_play" style="background:#1d4ed8">PLAY</button>
+    <button class="btn-tv" data-cmd="/mp3_eq">EQ</button>
+  </div>
+
+  <div class="line"></div><h3>SMART FAN</h3>
+  <div class="grid-3">
+    <button class="btn-tv" data-cmd="/kipas_pwr" style="color:#ff4d4d">PWR</button>
+    <button class="btn-tv" data-cmd="/kipas_speed">SPEED</button>
+    <button class="btn-tv" data-cmd="/kipas_swing">SWING</button>
+  </div>
+  <button class="btn-tv" data-cmd="/kipas_mode" style="margin-top:10px">MODE KIPAS</button>
+
+  <div class="line"></div><h3>CH SELECT</h3>
+  <div class="grid-3" id="nums"></div>
+</div>
+
+<div class="panel"><h3>Info</h3>
+  <div class="grid-2">
+    <button class="btn-relay" data-cmd="/suhu" style="background:#2563eb">SUHU</button>
+    <button class="btn-relay" data-cmd="/kondisi" style="background:#2563eb">KONDISI ROBOT</button>
+  </div>
+</div>
+<div class="panel"><h3>Kondisi</h3><pre id="kond">-</pre><div class="info" id="age"></div></div>
+<div class="panel"><h3>Pemberitahuan</h3><pre id="alrt">-</pre></div>
+<div class="panel"><h3>Robot bicara</h3><div class="info">Menyusul (butuh pembaruan robot).</div></div>
 
 <script>
 (function () {
-  var BUTTONS = [
-    ["Lampu ON", "/lampu_on", "on"], ["Lampu OFF", "/lampu_off", "off"],
-    ["Kipas ON", "/kipas_on", "on"], ["Kipas OFF", "/kipas_off", "off"],
-    ["Colokan ON", "/colokan_on", "on"], ["Colokan OFF", "/colokan_off", "off"],
-    ["Colokan panjang ON", "/colokan2_on", "on"], ["Colokan panjang OFF", "/colokan2_off", "off"],
-    ["MP3 ON", "/mp3_on", "on"], ["MP3 OFF", "/mp3_off", "off"],
-    ["MP3 Play/Pause", "/mp3_play", ""], ["MP3 Mode", "/mp3_mode", ""],
-    ["Suhu", "/suhu", "blue"], ["Kondisi", "/kondisi", "blue"]
-  ];
   var mem = {};
   function lsGet(k) { try { return localStorage.getItem(k) || mem[k] || ""; } catch (e) { return mem[k] || ""; } }
   function lsSet(k, v) { mem[k] = v; try { localStorage.setItem(k, v); } catch (e) {} }
   var $ = function (id) { return document.getElementById(id); };
   var base = lsGet("rb_base"), key = lsGet("rb_key");
+  var lcd = { time: "--:--:--", suhu: "--", lampu: "--", stat: "Belum diatur" };
 
   function normBase(u) { u = (u || "").trim(); while (u.charAt(u.length - 1) === "/") u = u.slice(0, -1); return u; }
   function ready() { return base.indexOf("https://") === 0 && key.length >= 24; }
   function url(path) { return base + "/ctrl/" + encodeURIComponent(key) + "/" + path + ".json"; }
-  function say(t, cls) { var m = $("msg"); m.textContent = t; m.className = "small " + (cls || ""); }
+  function drawLcd() {
+    $("lcd").textContent = "TIME : " + lcd.time + "\nSUHU : " + lcd.suhu + " C\nLAMPU: " + lcd.lampu + "\nSTAT : " + lcd.stat;
+  }
+  var lastStatAt = 0;
+  function stat(t) { lcd.stat = t; lastStatAt = Date.now(); drawLcd(); }
 
   async function api(path, method, body) {
     var opt = { method: method || "GET", cache: "no-store" };
@@ -94,56 +121,73 @@
 
   var busy = false;
   async function send(cmd) {
-    if (!ready()) { $("setup").hidden = false; say("Isi pengaturan dulu.", "warn"); return; }
-    if (busy) return;
+    if (!ready()) { $("setup").hidden = false; stat("Isi pengaturan dulu"); return; }
+    if (busy) { stat("Tunggu perintah sebelumnya"); return; }
     busy = true;
     var n = Date.now();
     try {
-      say("Mengirim " + cmd + " ...");
+      stat("Mengirim " + cmd + " ...");
       await api("cmd", "PUT", { c: cmd, n: n });
-      say("Terkirim, menunggu DevKit (maks. 25 detik) ...");
+      stat("Menunggu DevKit (maks. 25 dtk) ...");
       var t0 = Date.now(), got = null;
       while (Date.now() - t0 < 25000) {
         await new Promise(function (r) { setTimeout(r, 1500); });
         var a = await api("ack");
         if (a && a.n === n) { got = a; break; }
       }
-      if (got) say(got.r + (got.t ? "  (" + got.t + ")" : ""), "ok");
-      else say("DevKit belum membalas. Cek apakah DevKit menyala dan tersambung Wi-Fi.", "bad");
+      if (got) stat(got.r);
+      else stat("DevKit belum membalas (mati / Wi-Fi putus?)");
       refresh();
     } catch (e) {
-      say("Gagal: " + e.message + ". Cek alamat database, kunci, dan Rules Firebase.", "bad");
+      stat("Gagal: " + e.message + " (cek alamat, kunci, Rules)");
     } finally { busy = false; }
+  }
+
+  var RELAYS = [["b_r1", "colokan"], ["b_r2", "colokan panjang"], ["b_r3", "saklar lampu"], ["b_r4", "mp3 player"]];
+  function drawRelays(r) {
+    if (!r || r.length < 4) return;
+    RELAYS.forEach(function (it, i) {
+      var c = r.charAt(i), el = $(it[0]);
+      el.textContent = it[1] + ": " + (c === "1" ? "ON" : c === "0" ? "OFF" : "?");
+      el.style.background = c === "1" ? "#10b981" : c === "0" ? "#ef4444" : "#6b7280";
+    });
   }
 
   async function refresh() {
     if (!ready()) return;
     try {
       var s = await api("state");
-      $("conn").textContent = "Tersambung ke database.";
-      $("conn").className = "small ok";
-      if (!s) { $("age").textContent = "DevKit belum pernah mengirim kondisi."; return; }
+      if (!s) { stat("DevKit belum pernah mengirim kondisi"); return; }
+      drawRelays(s.r);
+      if (s.su) lcd.suhu = s.su;
+      if (s.ld) lcd.lampu = s.ld;
       $("kond").textContent = s.k || "-";
-      $("stat").textContent = s.s || "-";
       $("alrt").textContent = s.a || "Tidak ada.";
       if (s.e) {
-        var age = Math.round(Date.now() / 1000 - s.e);
-        var old = age > 120;
-        $("age").textContent = old ? ("DevKit tidak melapor " + Math.round(age / 60) + " menit (mati atau Wi-Fi putus?)") : ("Diperbarui " + (age < 0 ? 0 : age) + " detik lalu");
-        $("age").className = "small " + (old ? "bad" : "");
-      } else { $("age").textContent = "Jam DevKit belum tersedia."; }
+        var d = new Date(s.e * 1000);
+        function p(x) { return (x < 10 ? "0" : "") + x; }
+        lcd.time = p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+        var age = Math.max(0, Math.round(Date.now() / 1000 - s.e)), old = age > 120;
+        $("age").textContent = old ? ("DevKit tidak melapor " + Math.round(age / 60) + " menit (mati atau Wi-Fi putus?)") : ("Diperbarui " + age + " detik lalu");
+        $("age").className = "info " + (old ? "bad" : "");
+        if (!busy && Date.now() - lastStatAt > 8000) lcd.stat = old ? "DevKit tidak melapor" : "Tersambung";
+      }
+      drawLcd();
     } catch (e) {
-      $("conn").textContent = "Gagal membaca database: " + e.message;
-      $("conn").className = "small bad";
+      if (!busy) stat("Gagal membaca database: " + e.message);
     }
   }
 
-  var box = $("ctl");
-  BUTTONS.forEach(function (b) {
-    var el = document.createElement("button");
-    el.type = "button"; el.textContent = b[0]; if (b[2]) el.className = b[2];
-    el.addEventListener("click", function () { send(b[1]); });
-    box.appendChild(el);
+  var nums = $("nums");
+  [1, 2, 3, 4, 5, 6, 7, 8, 9, null, 0].forEach(function (n) {
+    if (n === null) { nums.appendChild(document.createElement("div")); return; }
+    var b = document.createElement("button");
+    b.type = "button"; b.className = "btn-tv btn-num"; b.textContent = n; b.setAttribute("data-cmd", "/ch_" + n);
+    nums.appendChild(b);
+  });
+  document.addEventListener("click", function (ev) {
+    var el = ev.target.closest ? ev.target.closest("[data-cmd]") : null;
+    if (el) send(el.getAttribute("data-cmd"));
   });
 
   $("btnSet").addEventListener("click", function () { $("setup").hidden = !$("setup").hidden; $("inUrl").value = base; $("inKey").value = key; });
@@ -151,10 +195,11 @@
     base = normBase($("inUrl").value); key = $("inKey").value.trim();
     lsSet("rb_base", base); lsSet("rb_key", key);
     $("setup").hidden = true;
-    if (!ready()) say("Alamat harus diawali https:// dan kunci minimal 24 karakter.", "bad"); else { say("Tersimpan."); refresh(); }
+    if (!ready()) stat("Alamat harus https:// dan kunci min. 24 karakter"); else { stat("Tersimpan"); refresh(); }
   });
 
-  if (!ready()) { $("setup").hidden = false; $("conn").textContent = "Belum diatur."; }
+  if (!ready()) { $("setup").hidden = false; }
+  drawLcd();
   refresh();
   setInterval(refresh, 5000);
 })();
