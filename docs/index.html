@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kontrol Robot</title>
+<style>
+  :root{--bg:#111318;--card:#20232b;--line:#343844;--text:#e7e9ef;--mute:#9ca3af;--blue:#2563eb;--green:#34d399;--red:#f87171;--amber:#fbbf24}
+  @media (prefers-color-scheme: light){:root{--bg:#f3f4f6;--card:#fff;--line:#d1d5db;--text:#111827;--mute:#6b7280}}
+  *{box-sizing:border-box}
+  body{margin:0;padding:16px;background:var(--bg);color:var(--text);font:16px/1.4 system-ui,Arial,sans-serif}
+  .wrap{max-width:560px;margin:auto}
+  h1{font-size:22px;margin:4px 0 12px}
+  h2{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);margin:18px 0 8px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:10px 0}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  button{font:inherit;font-weight:600;padding:14px 8px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--text);cursor:pointer}
+  button:active{transform:scale(.98)}
+  .on{background:#065f46;border-color:#065f46;color:#fff}
+  .off{background:#7f1d1d;border-color:#7f1d1d;color:#fff}
+  .blue{background:var(--blue);border-color:var(--blue);color:#fff}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  input{width:100%;padding:12px;margin:6px 0;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit}
+  pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:14px/1.5 ui-monospace,Menlo,monospace}
+  .small{font-size:12px;color:var(--mute)}
+  .ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}
+  .top{display:flex;justify-content:space-between;align-items:center}
+  .top button{padding:8px 12px;font-size:14px}
+  #msg{min-height:22px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><h1>Kontrol Robot</h1><button id="btnSet" type="button">Atur</button></div>
+
+  <div class="card" id="setup" hidden>
+    <div class="small">Isi sekali saja. Disimpan hanya di HP ini, tidak di GitHub.</div>
+    <input id="inUrl" type="url" placeholder="Alamat database Firebase (https://...firebasedatabase.app)" autocomplete="off">
+    <input id="inKey" type="password" placeholder="Kunci rahasia dari halaman DevKit /remote" autocomplete="off">
+    <button class="blue" id="btnSave" type="button" style="width:100%">Simpan</button>
+  </div>
+
+  <div class="card">
+    <div id="conn" class="small">Belum diatur.</div>
+    <div id="msg" class="small"></div>
+  </div>
+
+  <h2>Rumah</h2>
+  <div class="grid" id="ctl"></div>
+
+  <h2>Robot bicara</h2>
+  <div class="card">
+    <input id="inSay" type="text" placeholder="Ketik kalimat untuk diucapkan robot" disabled>
+    <button type="button" disabled style="width:100%">Ucapkan (menyusul, butuh pembaruan robot)</button>
+  </div>
+
+  <h2>Kondisi</h2>
+  <div class="card"><pre id="kond">-</pre><div class="small" id="age"></div></div>
+  <h2>Status relay</h2>
+  <div class="card"><pre id="stat">-</pre></div>
+  <h2>Pemberitahuan</h2>
+  <div class="card"><pre id="alrt">-</pre></div>
+</div>
+
+<script>
+(function () {
+  var BUTTONS = [
+    ["Lampu ON", "/lampu_on", "on"], ["Lampu OFF", "/lampu_off", "off"],
+    ["Kipas ON", "/kipas_on", "on"], ["Kipas OFF", "/kipas_off", "off"],
+    ["Colokan ON", "/colokan_on", "on"], ["Colokan OFF", "/colokan_off", "off"],
+    ["Colokan panjang ON", "/colokan2_on", "on"], ["Colokan panjang OFF", "/colokan2_off", "off"],
+    ["MP3 ON", "/mp3_on", "on"], ["MP3 OFF", "/mp3_off", "off"],
+    ["MP3 Play/Pause", "/mp3_play", ""], ["MP3 Mode", "/mp3_mode", ""],
+    ["Suhu", "/suhu", "blue"], ["Kondisi", "/kondisi", "blue"]
+  ];
+  var mem = {};
+  function lsGet(k) { try { return localStorage.getItem(k) || mem[k] || ""; } catch (e) { return mem[k] || ""; } }
+  function lsSet(k, v) { mem[k] = v; try { localStorage.setItem(k, v); } catch (e) {} }
+  var $ = function (id) { return document.getElementById(id); };
+  var base = lsGet("rb_base"), key = lsGet("rb_key");
+
+  function normBase(u) { u = (u || "").trim(); while (u.charAt(u.length - 1) === "/") u = u.slice(0, -1); return u; }
+  function ready() { return base.indexOf("https://") === 0 && key.length >= 24; }
+  function url(path) { return base + "/ctrl/" + encodeURIComponent(key) + "/" + path + ".json"; }
+  function say(t, cls) { var m = $("msg"); m.textContent = t; m.className = "small " + (cls || ""); }
+
+  async function api(path, method, body) {
+    var opt = { method: method || "GET", cache: "no-store" };
+    if (body !== undefined) { opt.headers = { "Content-Type": "application/json" }; opt.body = JSON.stringify(body); }
+    var r = await fetch(url(path), opt);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }
+
+  var busy = false;
+  async function send(cmd) {
+    if (!ready()) { $("setup").hidden = false; say("Isi pengaturan dulu.", "warn"); return; }
+    if (busy) return;
+    busy = true;
+    var n = Date.now();
+    try {
+      say("Mengirim " + cmd + " ...");
+      await api("cmd", "PUT", { c: cmd, n: n });
+      say("Terkirim, menunggu DevKit (maks. 25 detik) ...");
+      var t0 = Date.now(), got = null;
+      while (Date.now() - t0 < 25000) {
+        await new Promise(function (r) { setTimeout(r, 1500); });
+        var a = await api("ack");
+        if (a && a.n === n) { got = a; break; }
+      }
+      if (got) say(got.r + (got.t ? "  (" + got.t + ")" : ""), "ok");
+      else say("DevKit belum membalas. Cek apakah DevKit menyala dan tersambung Wi-Fi.", "bad");
+      refresh();
+    } catch (e) {
+      say("Gagal: " + e.message + ". Cek alamat database, kunci, dan Rules Firebase.", "bad");
+    } finally { busy = false; }
+  }
+
+  async function refresh() {
+    if (!ready()) return;
+    try {
+      var s = await api("state");
+      $("conn").textContent = "Tersambung ke database.";
+      $("conn").className = "small ok";
+      if (!s) { $("age").textContent = "DevKit belum pernah mengirim kondisi."; return; }
+      $("kond").textContent = s.k || "-";
+      $("stat").textContent = s.s || "-";
+      $("alrt").textContent = s.a || "Tidak ada.";
+      if (s.e) {
+        var age = Math.round(Date.now() / 1000 - s.e);
+        var old = age > 120;
+        $("age").textContent = old ? ("DevKit tidak melapor " + Math.round(age / 60) + " menit (mati atau Wi-Fi putus?)") : ("Diperbarui " + (age < 0 ? 0 : age) + " detik lalu");
+        $("age").className = "small " + (old ? "bad" : "");
+      } else { $("age").textContent = "Jam DevKit belum tersedia."; }
+    } catch (e) {
+      $("conn").textContent = "Gagal membaca database: " + e.message;
+      $("conn").className = "small bad";
+    }
+  }
+
+  var box = $("ctl");
+  BUTTONS.forEach(function (b) {
+    var el = document.createElement("button");
+    el.type = "button"; el.textContent = b[0]; if (b[2]) el.className = b[2];
+    el.addEventListener("click", function () { send(b[1]); });
+    box.appendChild(el);
+  });
+
+  $("btnSet").addEventListener("click", function () { $("setup").hidden = !$("setup").hidden; $("inUrl").value = base; $("inKey").value = key; });
+  $("btnSave").addEventListener("click", function () {
+    base = normBase($("inUrl").value); key = $("inKey").value.trim();
+    lsSet("rb_base", base); lsSet("rb_key", key);
+    $("setup").hidden = true;
+    if (!ready()) say("Alamat harus diawali https:// dan kunci minimal 24 karakter.", "bad"); else { say("Tersimpan."); refresh(); }
+  });
+
+  if (!ready()) { $("setup").hidden = false; $("conn").textContent = "Belum diatur."; }
+  refresh();
+  setInterval(refresh, 5000);
+})();
+</script>
+</body>
+</html>
