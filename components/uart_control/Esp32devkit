@@ -747,7 +747,6 @@ String halamanWeb() {
   h += "<a href='/history' style='display:block;background:#2563eb;color:white;padding:12px;border-radius:10px;text-decoration:none;margin:10px 0 8px'>RIWAYAT PERCAKAPAN ROBOT</a>";
   h += "<a href='/robot' style='display:block;background:#7c3aed;color:white;padding:12px;border-radius:10px;text-decoration:none;margin:8px 0'>KESEHATAN ROBOT</a>";
   h += "<a href='/remote' style='display:block;background:#b45309;color:white;padding:12px;border-radius:10px;text-decoration:none;margin:8px 0'>KONTROL JARAK JAUH (WEB)</a>";
-  h += "<a href='/telegram' style='display:block;background:#0e7490;color:white;padding:12px;border-radius:10px;text-decoration:none;margin:8px 0'>BOT TELEGRAM</a>";
   h += "<a href='/ota' style='display:block;background:#475569;color:white;padding:12px;border-radius:10px;text-decoration:none;margin:8px 0'>PASANG PROGRAM (OTA)</a>";
   h += "<a href='/search' style='display:block;background:#047857;color:white;padding:12px;border-radius:10px;text-decoration:none;margin:8px 0 18px'>HASIL PENCARIAN WEB</a>";
 
@@ -901,7 +900,7 @@ static void robotEvtTrim() {
   LittleFS.rename(ROBOT_EVT_TMP, ROBOT_EVT_FILE);
 }
 
-void tgNotifyEvent(const char* kind, const char* detail);   // bot Telegram (didefinisikan di bawah)
+void tgNotifyEvent(const char* kind, const char* detail);   // pemberitahuan kejadian robot (didefinisikan di bawah)
 
 static void robotEvtAppend(const char* kind, int rssi, uint32_t ram, int ws, const char* detail) {
   tgNotifyEvent(kind, detail);
@@ -1259,36 +1258,12 @@ void handleOtaDone() {
 }
 
 // =====================================================
-// BOT TELEGRAM (kontrol dan pemberitahuan dari luar rumah)
-// DevKit yang bertanya ke Telegram tiap beberapa detik, jadi router tidak perlu dibuka.
-// Token dan ID chat disimpan di DevKit (halaman /telegram), TIDAK ditulis di kode.
-// Hanya chat dengan ID yang tersimpan yang dilayani; chat lain diabaikan.
+// PERINTAH DAN PEMBERITAHUAN BERSAMA (dipakai oleh jalur jarak jauh /remote)
+// Isinya: pengurai perintah (/lampu_on dst), teks kondisi, dan pesan kejadian robot.
 // =====================================================
-static Preferences tgPrefs;
-static String tgToken = "";
-static String tgChatId = "";
-static bool tgReady = false;
-static bool tgFirstPoll = true;            // poll pertama setelah nyala: hanya sinkron, perintah lama tidak dijalankan
-static long tgOffset = 0;
-static unsigned long tgNextPollMs = 0;
-static int tgFailCount = 0;
-static String tgLastStatus = "Belum diatur";
-static String tgPendingChat = "";          // ID chat yang belum dikenal (untuk dipasangkan lewat halaman web)
-static String tgPendingName = "";
-static String tgOutbox = "";
 static unsigned long tgLastGeminiNotifyMs = 0;
 static unsigned long tgLastWifiNotifyMs = 0;
 static bool tgRobotLostNotified = false;
-static const unsigned long TG_POLL_MS = 5000UL;
-
-static void tgLoad() {
-  if (!tgPrefs.begin("tg", false)) return;
-  tgToken = tgPrefs.getString("token", "");
-  tgChatId = tgPrefs.getString("chat", "");
-  tgReady = tgToken.length() > 20;
-  tgLastStatus = tgReady ? "Menunggu poll pertama" : "Belum diatur";
-  tgNextPollMs = millis() + 8000UL;
-}
 
 static String tgJsonEscape(const String& in) {
   String o;
@@ -1301,49 +1276,6 @@ static String tgJsonEscape(const String& in) {
     else o += c;
   }
   return o;
-}
-
-static bool tgRequest(const String& path, const String& body, String& out) {
-  if (WiFi.status() != WL_CONNECTED) { tgLastStatus = "Wi-Fi DevKit putus"; return false; }
-  WiFiClientSecure cl;
-  cl.setInsecure();                       // tanpa cek sertifikat (cukup untuk kontrol rumah)
-  HTTPClient http;
-  String url = String("https://api.telegram.org/bot") + tgToken + "/" + path;
-  if (!http.begin(cl, url)) { tgLastStatus = "Gagal memulai koneksi"; return false; }
-  http.setConnectTimeout(5000);
-  http.setTimeout(5000);
-  int code;
-  if (body.length()) { http.addHeader("Content-Type", "application/json"); code = http.POST(body); }
-  else code = http.GET();
-  if (code == 200) { out = http.getString(); http.end(); return true; }
-  if (code == 401) tgLastStatus = "Token salah (401)";
-  else if (code > 0) tgLastStatus = String("Telegram membalas ") + String(code);
-  else tgLastStatus = String("Gagal sambung: ") + http.errorToString(code);
-  http.end();
-  return false;
-}
-
-static bool tgSend(const String& chat, const String& text, bool menu) {
-  String body = String("{\"chat_id\":\"") + chat + "\",\"text\":\"" + tgJsonEscape(text) + "\"";
-  if (menu) {
-    body += ",\"reply_markup\":{\"keyboard\":["
-            "[{\"text\":\"/lampu_on\"},{\"text\":\"/lampu_off\"}],"
-            "[{\"text\":\"/kipas_on\"},{\"text\":\"/kipas_off\"}],"
-            "[{\"text\":\"/colokan_on\"},{\"text\":\"/colokan_off\"}],"
-            "[{\"text\":\"/mp3_on\"},{\"text\":\"/mp3_off\"}],"
-            "[{\"text\":\"/kondisi\"},{\"text\":\"/suhu\"},{\"text\":\"/status\"}]"
-            "],\"resize_keyboard\":true}";
-  }
-  body += "}";
-  String out;
-  return tgRequest("sendMessage", body, out);
-}
-
-static void tgNotify(const String& msg) {
-  if (!tgReady || tgChatId.length() == 0) return;
-  if (tgOutbox.length() > 500) return;     // jangan menumpuk
-  if (tgOutbox.length()) tgOutbox += "\n";
-  tgOutbox += msg;
 }
 
 static void rcAlert(const String& msg);   // pemberitahuan di halaman web jarak jauh (didefinisikan di bawah)
@@ -1372,7 +1304,6 @@ void tgNotifyEvent(const char* kind, const char* detail) {
   if (!kind) return;
   String m = eventMessage(kind, detail);
   if (!m.length()) return;
-  tgNotify(m);
   rcAlert(m);
 }
 
@@ -1474,35 +1405,6 @@ static String tgCommandReply(String text, bool* showMenu) {
   return "Perintah tidak dikenal. Kirim /menu";
 }
 
-// Urai balasan getUpdates. Tiap pembaruan: perbarui offset, kenali chat, jalankan perintah.
-static void tgProcessUpdates(const String& json, bool execute) {
-  int pos = 0;
-  const String key = "\"update_id\":";
-  int guard = 0;
-  while (guard++ < 10) {
-    int idx = json.indexOf(key, pos);
-    if (idx < 0) break;
-    int next = json.indexOf(key, idx + (int)key.length());
-    String seg = json.substring(idx, next < 0 ? (int)json.length() : next);
-    pos = (next < 0) ? (int)json.length() : next;
-    long uid = tgNumberAfter(seg, key).toInt();
-    if (uid + 1 > tgOffset) tgOffset = uid + 1;
-    String chat = tgNumberAfter(seg, "\"chat\":{\"id\":");
-    String text = tgJsonStr(seg, "text");
-    if (chat.length() == 0 || text.length() == 0) continue;
-    if (tgChatId.length() == 0 || chat != tgChatId) {
-      tgPendingChat = chat;
-      tgPendingName = tgJsonStr(seg, "first_name");
-      continue;                              // chat tak dikenal: tidak dilayani dan tidak dibalas
-    }
-    if (!execute) continue;
-    bool menu = false;
-    String reply = tgCommandReply(text, &menu);
-    bunyikanBuzzer(1, 60, 0);
-    tgSend(chat, reply, menu);
-  }
-}
-
 // Robot tidak melapor lebih dari 3 menit = kemungkinan mati / Wi-Fi putus. Dipanggil dari loop().
 static void robotWatch() {
   if (!robotEverReported) return;
@@ -1510,96 +1412,12 @@ static void robotWatch() {
   if (age > 180 && !tgRobotLostNotified) {
     tgRobotLostNotified = true;
     String m = "Robot tidak mengirim laporan lebih dari 3 menit (mati atau Wi-Fi putus?).";
-    tgNotify(m); rcAlert(m);
+    rcAlert(m);
   } else if (age <= 150 && tgRobotLostNotified) {
     tgRobotLostNotified = false;
     String m = "Robot kembali mengirim laporan.";
-    tgNotify(m); rcAlert(m);
+    rcAlert(m);
   }
-}
-
-static void tgLoop() {
-  if (!tgReady) return;
-  unsigned long now = millis();
-  if ((long)(now - tgNextPollMs) < 0) return;
-  if (WiFi.status() != WL_CONNECTED) { tgNextPollMs = now + TG_POLL_MS; return; }
-
-  if (tgOutbox.length() && tgChatId.length()) {
-    String msg = tgOutbox; tgOutbox = "";
-    tgSend(tgChatId, msg, false);
-  }
-  String out;
-  String path = String("getUpdates?timeout=0&limit=5&offset=") + String(tgOffset);
-  if (tgRequest(path, "", out)) {
-    tgFailCount = 0;
-    tgLastStatus = String("Tersambung, poll terakhir ") + ambilWaktu();
-    tgProcessUpdates(out, !tgFirstPoll);
-    tgFirstPoll = false;
-    tgNextPollMs = millis() + TG_POLL_MS;
-  } else {
-    if (tgFailCount < 12) ++tgFailCount;
-    unsigned long wait = 5000UL * (unsigned long)tgFailCount;
-    if (wait > 60000UL) wait = 60000UL;
-    tgNextPollMs = millis() + wait;
-  }
-}
-
-void handleTelegramPage() {
-  String h = "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<style>body{margin:0;padding:16px;background:#111318;color:#e7e9ef;font:16px Arial,sans-serif}.wrap{max-width:560px;margin:auto}"
-    ".box{background:#20232b;border:1px solid #343844;border-radius:12px;padding:14px;margin:10px 0}"
-    "input,button{width:100%;box-sizing:border-box;padding:12px;margin:6px 0;border-radius:9px;border:1px solid #343844;background:#181b22;color:#fff;font-size:16px}"
-    "button{background:#2563eb;border:0;font-weight:bold}.red{background:#7f1d1d}.back{display:block;color:#fff;background:#343844;padding:12px;border-radius:9px;text-decoration:none;margin:10px 0}"
-    ".small{font-size:12px;color:#9ca3af}.ok{color:#34d399}.bad{color:#f87171}</style></head><body><div class='wrap'>"
-    "<a class='back' href='/'>← Kembali</a><h2>Bot Telegram</h2>";
-  h += String("<div class='box'><div class='") + (tgReady ? "ok'>AKTIF" : "bad'>BELUM AKTIF") + "</div><div class='small'>" + historyEscapeHtml(tgLastStatus.c_str()) + "</div>";
-  if (tgReady) h += String("<div class='small'>Token: ") + tgToken.substring(0, 6) + "... (disembunyikan)</div>";
-  h += String("<div class='small'>ID chat terdaftar: ") + (tgChatId.length() ? tgChatId : String("belum ada")) + "</div></div>";
-  if (tgPendingChat.length() && tgPendingChat != tgChatId) {
-    h += "<div class='box'><b>Ada pesan dari:</b> " + historyEscapeHtml(tgPendingName.c_str()) + " (ID " + tgPendingChat + ")"
-         "<form method='POST' action='/telegram_save'><input type='hidden' name='chat' value='" + tgPendingChat + "'>"
-         "<button type='submit'>Pakai ID ini (hanya akun ini yang boleh mengontrol)</button></form></div>";
-  }
-  h += "<div class='box'><form method='POST' action='/telegram_save'>"
-       "<div class='small'>Token dari @BotFather (kosongkan kalau tidak diganti)</div>"
-       "<input type='password' name='token' autocomplete='off' placeholder='Token bot'>"
-       "<div class='small'>ID chat (boleh dikosongkan; nanti muncul otomatis setelah kamu mengirim pesan ke bot)</div>"
-       "<input type='text' name='chat' placeholder='ID chat'>"
-       "<button type='submit'>Simpan</button></form></div>";
-  if (tgReady && tgChatId.length()) h += "<form method='POST' action='/telegram_test'><button type='submit'>Kirim pesan tes</button></form>";
-  h += "<form method='POST' action='/telegram_clear'><button class='red' type='submit'>Hapus token dan ID</button></form>";
-  h += "<div class='small'>Kirim /menu ke bot di Telegram untuk melihat tombol kontrol.</div></div></body></html>";
-  server.send(200, "text/html; charset=utf-8", h);
-}
-
-void handleTelegramSave() {
-  String tok = server.arg("token"); tok.trim();
-  String chat = server.arg("chat"); chat.trim();
-  if (!tgPrefs.begin("tg", false)) { server.send(500, "text/plain", "Penyimpanan gagal"); return; }
-  if (tok.length() > 20) tgToken = tok;
-  if (chat.length()) tgChatId = chat;
-  tgPrefs.putString("token", tgToken);
-  tgPrefs.putString("chat", tgChatId);
-  tgReady = tgToken.length() > 20;
-  tgFirstPoll = true; tgOffset = 0; tgFailCount = 0;
-  tgNextPollMs = millis() + 1000UL;
-  tgLastStatus = tgReady ? "Disimpan, menunggu poll" : "Belum diatur";
-  server.sendHeader("Location", "/telegram");
-  server.send(303, "text/plain", "");
-}
-
-void handleTelegramTest() {
-  tgNotify("Tes dari DevKit: bot Telegram bekerja. Kirim /menu untuk tombol kontrol.");
-  server.sendHeader("Location", "/telegram");
-  server.send(303, "text/plain", "");
-}
-
-void handleTelegramClear() {
-  if (tgPrefs.begin("tg", false)) { tgPrefs.remove("token"); tgPrefs.remove("chat"); }
-  tgToken = ""; tgChatId = ""; tgReady = false; tgPendingChat = ""; tgPendingName = ""; tgOutbox = "";
-  tgLastStatus = "Belum diatur";
-  server.sendHeader("Location", "/telegram");
-  server.send(303, "text/plain", "");
 }
 
 // =====================================================
@@ -1609,6 +1427,8 @@ void handleTelegramClear() {
 // Keamanan: alamat database dan KUNCI RAHASIA (32 karakter acak) disimpan di DevKit dan di HP-mu, TIDAK di kode/GitHub.
 // =====================================================
 static Preferences rcPrefs;
+static bool rcPrefsOk = false;
+static bool rcOpenPrefs() { if (!rcPrefsOk) rcPrefsOk = rcPrefs.begin("rc", false); return rcPrefsOk; }
 static String rcBase = "";          // contoh: https://nama-default-rtdb.asia-southeast1.firebasedatabase.app
 static String rcKey = "";
 static bool rcReady = false;
@@ -1623,7 +1443,7 @@ static const unsigned long RC_POLL_MS = 4000UL;
 static const unsigned long RC_STATE_MS = 30000UL;
 
 static void rcLoad() {
-  if (!rcPrefs.begin("rc", false)) return;
+  if (!rcOpenPrefs()) return;
   rcBase = rcPrefs.getString("base", "");
   rcKey = rcPrefs.getString("key", "");
   rcReady = rcBase.startsWith("https://") && rcKey.length() >= 24;
@@ -1751,7 +1571,7 @@ void handleRemotePage() {
 void handleRemoteSave() {
   String base = server.arg("base"); base.trim();
   while (base.length() && base.charAt(base.length() - 1) == '/') base = base.substring(0, base.length() - 1);
-  if (!rcPrefs.begin("rc", false)) { server.send(500, "text/plain", "Penyimpanan gagal"); return; }
+  if (!rcOpenPrefs()) { server.send(500, "text/plain", "Penyimpanan gagal"); return; }
   if (base.startsWith("https://")) rcBase = base;
   if (server.arg("gen") == "1" || (rcKey.length() < 24 && rcBase.length())) rcKey = rcGenerateKey();
   rcPrefs.putString("base", rcBase);
@@ -1771,7 +1591,7 @@ void handleRemoteTest() {
 }
 
 void handleRemoteClear() {
-  if (rcPrefs.begin("rc", false)) { rcPrefs.remove("base"); rcPrefs.remove("key"); }
+  if (rcOpenPrefs()) { rcPrefs.remove("base"); rcPrefs.remove("key"); }
   rcBase = ""; rcKey = ""; rcReady = false; rcAlerts = "";
   rcLastStatus = "Belum diatur";
   server.sendHeader("Location", "/remote");
@@ -1995,7 +1815,7 @@ void handleWebServerDenganTimeout() {
 // =====================================================
 void setup() {
   Serial.begin(115200);
-  Serial2.setRxBufferSize(2048);   // Telegram memblokir loop beberapa detik; jangan sampai laporan robot terbuang
+  Serial2.setRxBufferSize(2048);   // jalur jarak jauh memblokir loop beberapa detik; jangan sampai laporan robot terbuang
   Serial2.begin(115200, SERIAL_8N1, 16, 17);  // RX2=16, TX2=17
 
   WiFi.mode(WIFI_STA);
@@ -2042,7 +1862,6 @@ void setup() {
   konfigurasiNTP();
   historyLoad();
   historyFsBegin();
-  tgLoad();
   rcLoad();
 
   server.on("/history", handleHistory);
@@ -2053,10 +1872,6 @@ void setup() {
   server.on("/remote_save", HTTP_POST, handleRemoteSave);
   server.on("/remote_test", HTTP_POST, handleRemoteTest);
   server.on("/remote_clear", HTTP_POST, handleRemoteClear);
-  server.on("/telegram", HTTP_GET, handleTelegramPage);
-  server.on("/telegram_save", HTTP_POST, handleTelegramSave);
-  server.on("/telegram_test", HTTP_POST, handleTelegramTest);
-  server.on("/telegram_clear", HTTP_POST, handleTelegramClear);
   server.on("/ota", HTTP_GET, handleOtaPage);
   server.on("/ota_upload", HTTP_POST, handleOtaDone, handleOtaUpload);
   server.on("/robot_clear", handleRobotClear);
@@ -2086,7 +1901,6 @@ void loop() {
   handleWiFiDenganPrioritas();
   robotWatch();
   rcLoop();
-  tgLoop();
 
   time_t now = time(nullptr);
 
