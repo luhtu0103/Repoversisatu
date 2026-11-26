@@ -1167,13 +1167,14 @@ void handleRobotClear() {
 // Program lama tetap aman kalau unggahan gagal. Butuh skema partisi yang punya dua slot OTA
 // (Arduino IDE: "Default 4MB with spiffs").
 // =====================================================
-// GANTI sandi ini sebelum dipakai. Selama masih "GANTI_SANDI", halaman /ota menolak semua unggahan.
-static const char* OTA_PASSWORD = "GANTI_SANDI";
+// Sandi unggah. KOSONG ("") = tanpa sandi: siapa pun yang ada di Wi-Fi rumah bisa memasang program lewat /ota.
+// Mau pakai sandi: isi di antara tanda kutip, misalnya "rahasia123".
+static const char* OTA_PASSWORD = "";
 static bool otaOk = false;
 static String otaErr = "";
 
 static bool otaSandiBenar() {
-  if (strcmp(OTA_PASSWORD, "GANTI_SANDI") == 0) return false;   // belum diganti = nonaktif
+  if (OTA_PASSWORD[0] == '\0') return true;   // tanpa sandi
   return server.hasArg("pw") && server.arg("pw") == String(OTA_PASSWORD);
 }
 
@@ -1186,16 +1187,16 @@ void handleOtaPage() {
     ".small{font-size:12px;color:#9ca3af}.bad{color:#f87171}progress{width:100%;height:18px}</style></head><body><div class='wrap'>"
     "<a class='back' href='/'>← Kembali</a><h2>Pasang Program DevKit</h2>";
   h += String("<div class='box small'>Program yang sedang jalan dibuat: ") + __DATE__ + " " + __TIME__ + "</div>";
-  if (strcmp(OTA_PASSWORD, "GANTI_SANDI") == 0) {
-    h += "<div class='box bad'>OTA belum aktif. Ganti tulisan GANTI_SANDI pada OTA_PASSWORD di program DevKit dengan sandimu sendiri, lalu pasang sekali lewat USB.</div>";
-  } else {
-    h += "<div class='box'><form id='f'><input type='password' id='pw' placeholder='Sandi' autocomplete='off'>"
+  {
+    h += "<div class='box'><form id='f'>";
+    if (OTA_PASSWORD[0] != '\0') h += "<input type='password' id='pw' placeholder='Sandi' autocomplete='off'>";
+    h += "<input type='hidden' id='pwx' value=''>"
          "<input type='file' id='bin' accept='.bin'><button type='submit'>Unggah dan pasang</button>"
          "<progress id='p' value='0' max='100' style='display:none'></progress><div id='msg' class='small'></div></form>"
          "<div class='small'>Pakai file <b>devkit-ota.bin</b>. Jangan pakai file &quot;pertama-kali&quot;. Jangan bicara ke robot selama unggah (sekitar 1 menit).</div></div>"
          "<script>document.getElementById('f').onsubmit=function(e){e.preventDefault();"
-         "var f=document.getElementById('bin').files[0],pw=document.getElementById('pw').value,m=document.getElementById('msg'),p=document.getElementById('p');"
-         "if(!f||!pw){m.textContent='Isi sandi dan pilih file dulu.';return;}"
+         "var f=document.getElementById('bin').files[0],pe=document.getElementById('pw'),pw=pe?pe.value:'',m=document.getElementById('msg'),p=document.getElementById('p');"
+         "if(!f||(pe&&!pw)){m.textContent='Pilih file (dan isi sandi) dulu.';return;}"
          "var x=new XMLHttpRequest();x.open('POST','/ota_upload?pw='+encodeURIComponent(pw));p.style.display='block';"
          "x.upload.onprogress=function(ev){if(ev.lengthComputable)p.value=ev.loaded*100/ev.total;};"
          "x.onload=function(){m.textContent=x.responseText;if(x.status==200)setTimeout(function(){location='/'},12000);};"
