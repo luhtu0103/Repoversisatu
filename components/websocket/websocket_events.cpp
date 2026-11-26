@@ -101,7 +101,18 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
 
         case WEBSOCKET_EVENT_ERROR:
             ESP_LOGE(TAG, "WebSocket Error!");
-            robot_stats_note_ws_drop("err", data ? data->error_handle.esp_transport_sock_errno : 0);
+            {
+                /* errno hanya dipercaya kalau kecil dan masuk akal; selain itu laporkan jenis error sebagai angka negatif
+                   (-1 jaringan/TCP, -2 pong timeout, -3 handshake, -4 server menutup). */
+                int ws_err = 0;
+                if (data) {
+                    int en = (int)data->error_handle.esp_transport_sock_errno;
+                    int et = (int)data->error_handle.error_type;
+                    if (en > 0 && en <= 255) ws_err = en;
+                    else if (et > 0 && et <= 9) ws_err = -et;
+                }
+                robot_stats_note_ws_drop("err", ws_err);
+            }
             {
                 wifi_ap_record_t ap = {};
                 if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
