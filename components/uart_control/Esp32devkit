@@ -7,6 +7,7 @@
 #include <math.h>
 #include <Preferences.h>
 #include <LittleFS.h>
+#include <Update.h>
 
 // =====================================================
 // WIFI CONFIGURATION
@@ -742,6 +743,7 @@ String halamanWeb() {
   h += "<h3>OTAK WEB PEMANCAR</h3>";
   h += "<a href='/history' style='display:block;background:#2563eb;color:white;padding:12px;border-radius:10px;text-decoration:none;margin:10px 0 8px'>RIWAYAT PERCAKAPAN ROBOT</a>";
   h += "<a href='/robot' style='display:block;background:#7c3aed;color:white;padding:12px;border-radius:10px;text-decoration:none;margin:8px 0'>KESEHATAN ROBOT</a>";
+  h += "<a href='/ota' style='display:block;background:#475569;color:white;padding:12px;border-radius:10px;text-decoration:none;margin:8px 0'>PASANG PROGRAM (OTA)</a>";
   h += "<a href='/search' style='display:block;background:#047857;color:white;padding:12px;border-radius:10px;text-decoration:none;margin:8px 0 18px'>HASIL PENCARIAN WEB</a>";
 
   String txtLdr = (analogRead(PIN_LDR) > 100) ? "MENYALA" : "MATI";
@@ -1159,6 +1161,82 @@ void handleRobotClear() {
   server.send(303, "text/plain", "");
 }
 
+// =====================================================
+// PASANG PROGRAM LEWAT BROWSER (OTA)  ->  alamat DevKit + /ota
+// File yang diunggah: devkit-ota.bin (dari GitHub Release "devkit-..."), BUKAN yang "pertama-kali".
+// Program lama tetap aman kalau unggahan gagal. Butuh skema partisi yang punya dua slot OTA
+// (Arduino IDE: "Default 4MB with spiffs").
+// =====================================================
+// GANTI sandi ini sebelum dipakai. Selama masih "GANTI_SANDI", halaman /ota menolak semua unggahan.
+static const char* OTA_PASSWORD = "GANTI_SANDI";
+static bool otaOk = false;
+static String otaErr = "";
+
+static bool otaSandiBenar() {
+  if (strcmp(OTA_PASSWORD, "GANTI_SANDI") == 0) return false;   // belum diganti = nonaktif
+  return server.hasArg("pw") && server.arg("pw") == String(OTA_PASSWORD);
+}
+
+void handleOtaPage() {
+  String h = "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<style>body{margin:0;padding:16px;background:#111318;color:#e7e9ef;font:16px Arial,sans-serif}.wrap{max-width:560px;margin:auto}"
+    ".box{background:#20232b;border:1px solid #343844;border-radius:12px;padding:14px;margin:10px 0}"
+    "input,button{width:100%;box-sizing:border-box;padding:12px;margin:6px 0;border-radius:9px;border:1px solid #343844;background:#181b22;color:#fff;font-size:16px}"
+    "button{background:#2563eb;border:0;font-weight:bold}.back{display:block;color:#fff;background:#343844;padding:12px;border-radius:9px;text-decoration:none;margin:10px 0}"
+    ".small{font-size:12px;color:#9ca3af}.bad{color:#f87171}progress{width:100%;height:18px}</style></head><body><div class='wrap'>"
+    "<a class='back' href='/'>← Kembali</a><h2>Pasang Program DevKit</h2>";
+  h += String("<div class='box small'>Program yang sedang jalan dibuat: ") + __DATE__ + " " + __TIME__ + "</div>";
+  if (strcmp(OTA_PASSWORD, "GANTI_SANDI") == 0) {
+    h += "<div class='box bad'>OTA belum aktif. Ganti tulisan GANTI_SANDI pada OTA_PASSWORD di program DevKit dengan sandimu sendiri, lalu pasang sekali lewat USB.</div>";
+  } else {
+    h += "<div class='box'><form id='f'><input type='password' id='pw' placeholder='Sandi' autocomplete='off'>"
+         "<input type='file' id='bin' accept='.bin'><button type='submit'>Unggah dan pasang</button>"
+         "<progress id='p' value='0' max='100' style='display:none'></progress><div id='msg' class='small'></div></form>"
+         "<div class='small'>Pakai file <b>devkit-ota.bin</b>. Jangan pakai file &quot;pertama-kali&quot;. Jangan bicara ke robot selama unggah (sekitar 1 menit).</div></div>"
+         "<script>document.getElementById('f').onsubmit=function(e){e.preventDefault();"
+         "var f=document.getElementById('bin').files[0],pw=document.getElementById('pw').value,m=document.getElementById('msg'),p=document.getElementById('p');"
+         "if(!f||!pw){m.textContent='Isi sandi dan pilih file dulu.';return;}"
+         "var x=new XMLHttpRequest();x.open('POST','/ota_upload?pw='+encodeURIComponent(pw));p.style.display='block';"
+         "x.upload.onprogress=function(ev){if(ev.lengthComputable)p.value=ev.loaded*100/ev.total;};"
+         "x.onload=function(){m.textContent=x.responseText;if(x.status==200)setTimeout(function(){location='/'},12000);};"
+         "x.onerror=function(){m.textContent='Koneksi terputus. Cek apakah DevKit sudah restart.';};"
+         "var d=new FormData();d.append('firmware',f);x.send(d);m.textContent='Mengunggah...';};</script>";
+  }
+  h += "</div></body></html>";
+  server.send(200, "text/html; charset=utf-8", h);
+}
+
+void handleOtaUpload() {
+  HTTPUpload& up = server.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    otaOk = otaSandiBenar();
+    otaErr = otaOk ? "" : "Sandi salah atau OTA belum diaktifkan.";
+    if (otaOk) {
+      statusSistem = "OTA: menerima program";
+      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { otaOk = false; otaErr = String("Tidak bisa mulai: ") + Update.errorString(); }
+    }
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (otaOk && Update.write(up.buf, up.currentSize) != up.currentSize) {
+      otaOk = false; otaErr = String("Gagal menulis: ") + Update.errorString(); Update.abort();
+    }
+  } else if (up.status == UPLOAD_FILE_END) {
+    if (otaOk && !Update.end(true)) { otaOk = false; otaErr = String("Program tidak valid: ") + Update.errorString(); }
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    if (otaOk) Update.abort();
+    otaOk = false; otaErr = "Unggahan dibatalkan.";
+  }
+}
+
+void handleOtaDone() {
+  if (otaOk) {
+    server.send(200, "text/plain; charset=utf-8", "Berhasil. DevKit restart sendiri, tunggu sekitar 10 detik.");
+    delay(600);
+    ESP.restart();
+  } else {
+    server.send(400, "text/plain; charset=utf-8", otaErr.length() ? otaErr : String("Gagal. Program lama tetap dipakai."));
+  }
+}
+
 // Halaman riwayat lengkap dari file (150 pesan terakhir, paling lama di atas) + tombol hapus.
 void handleHistoryAll() {
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
@@ -1427,6 +1505,8 @@ void setup() {
   server.on("/history_all", handleHistoryAll);
   server.on("/history_clear", handleHistoryClear);
   server.on("/robot", handleRobot);
+  server.on("/ota", HTTP_GET, handleOtaPage);
+  server.on("/ota_upload", HTTP_POST, handleOtaDone, handleOtaUpload);
   server.on("/robot_clear", handleRobotClear);
   server.on("/search", handleWebSearchPage);
   server.on("/search_data", handleWebSearchData);
