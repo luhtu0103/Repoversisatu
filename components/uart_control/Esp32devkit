@@ -1380,6 +1380,23 @@ static String tgCommandReply(String text, bool* showMenu) {
   if (at > 0) cmd = cmd.substring(0, at);
   cmd.toLowerCase();
   if (cmd == "/start" || cmd == "/menu" || cmd == "/bantuan" || cmd == "/help") { *showMenu = true; return tgHelpText(); }
+  // --- sama seperti tombol di halaman lokal DevKit ---
+  if (cmd == "/r1") { setRelay(1, !statusRelay1); return String("Colokan: ") + tgOnOff(statusRelay1); }
+  if (cmd == "/r2") { setRelay(2, !statusRelay2); return String("Colokan panjang: ") + tgOnOff(statusRelay2); }
+  if (cmd == "/r3") { setRelay(3, !statusRelay3); return String("Saklar lampu: ") + tgOnOff(statusRelay3); }
+  if (cmd == "/r4") { setRelay(4, !statusRelay4); return String("MP3 player: ") + tgOnOff(statusRelay4); }
+  if (cmd == "/mochi_led")   { sendIRSignal(0x00FF12ED); return "Mochi: forced LED"; }
+  if (cmd == "/mochi_mute")  { sendIRSignal(0x00FF0AF5); return "Mochi: mute buzzer"; }
+  if (cmd == "/mochi_musik") { sendIRSignal(0x00FF827D); return "Mochi: putar musik"; }
+  if (cmd == "/mochi_cek")   { sendIRSignal(0x00FF708F); return "Mochi: tes hardware"; }
+  if (cmd == "/mp3_eq")      { sendIRSignal(0x00FFC23D); return "MP3: EQ"; }
+  if (cmd == "/kipas_pwr")   { setFan(!statusKipas); return String("Kipas: ") + tgOnOff(statusKipas); }
+  if (cmd == "/kipas_speed") { irsend.sendSymphony(0xD82, 12, 2); return "Kipas: kecepatan"; }
+  if (cmd == "/kipas_swing") { irsend.sendSymphony(0xD90, 12, 2); return "Kipas: swing"; }
+  if (cmd == "/kipas_mode")  { irsend.sendSymphony(0xDA0, 12, 2); return "Kipas: mode"; }
+  if (cmd.length() == 5 && cmd.startsWith("/ch_") && cmd.charAt(4) >= '0' && cmd.charAt(4) <= '9') {
+    sendIRSignal(kodeLagu[cmd.charAt(4) - '0']); return String("Pilih lagu/channel ") + cmd.charAt(4);
+  }
   if (cmd == "/lampu_on")  { tgForceRelay(3, true);  return "Lampu: ON (kirim sinyal)"; }
   if (cmd == "/lampu_off") { tgForceRelay(3, false); return "Lampu: OFF (kirim sinyal)"; }
   if (cmd == "/colokan_on")  { tgForceRelay(1, true);  return "Colokan: ON"; }
@@ -1496,7 +1513,15 @@ static void rcAlert(const String& msg) {
 static bool rcPushState() {
   bacaSensorSuhu();
   bool dummy = false;
+  // r = status relay 1..4: '1' ON, '0' OFF, '?' belum diketahui. su = suhu, ld = lampu ruangan (LDR).
+  String rs;
+  rs += statusRelay1Diketahui ? (statusRelay1 ? '1' : '0') : '?';
+  rs += statusRelay2Diketahui ? (statusRelay2 ? '1' : '0') : '?';
+  rs += statusRelay3Diketahui ? (statusRelay3 ? '1' : '0') : '?';
+  rs += statusRelay4 ? '1' : '0';
   String body = String("{\"e\":") + String((unsigned long)time(nullptr)) +
+                ",\"r\":\"" + rs + "\",\"su\":\"" + String(dataSuhu, 1) + "\",\"ld\":\"" +
+                ((analogRead(PIN_LDR) > 100) ? "MENYALA" : "MATI") + "\"" +
                 ",\"k\":\"" + tgJsonEscape(tgKondisiText()) +
                 "\",\"s\":\"" + tgJsonEscape(tgCommandReply("/status", &dummy)) +
                 "\",\"a\":\"" + tgJsonEscape(rcAlerts) + "\"}";
