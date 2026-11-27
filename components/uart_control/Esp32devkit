@@ -592,6 +592,39 @@ void prosesJadwalOLED(time_t sekarang) {
 // =====================================================
 // SERIAL2
 // =====================================================
+// ---- Perintah jarak jauh ke robot: bangunkan / bicara (lewat Serial2, balasan RMT|ACK) ----
+static uint32_t rmtNextId = 0;
+static uint32_t rmtAckId = 0;
+static String rmtAckCode;
+static int rmtWait = 0;                 // 0 tidak menunggu, 1 pesan diterima robot, 2 pesan sudah dikirim ke Gemini
+static unsigned long rmtWaitUntil = 0;
+static String rmtWaitN, rmtWaitQ;
+static String rcCurN;                   // nomor perintah web yang sedang dikerjakan
+static bool rmtAnswerReady = false;
+static String rmtAnswerText;
+
+static void rmtOnAck(const String& cmd) {        // RMT|ACK|<id>|<kode>
+  int p1 = cmd.indexOf('|', 8);
+  if (p1 < 0) return;
+  uint32_t id = (uint32_t)cmd.substring(8, p1).toInt();
+  String code = cmd.substring(p1 + 1);
+  rmtAckId = id;
+  rmtAckCode = code;
+  if (rmtWait == 1 && code == "terkirim") rmtWait = 2;
+  else if (rmtWait != 0 && code == "gagal") {
+    rmtAnswerText = "(Robot gagal tersambung ke Gemini, pesan tidak tersampaikan)";
+    rmtAnswerReady = true;
+    rmtWait = 0;
+  }
+}
+
+static void rmtOnAnswer(const String& text) {    // jawaban Gemini (HISTA) setelah pesan terkirim
+  if (rmtWait != 2) return;
+  rmtAnswerText = text;
+  rmtAnswerReady = true;
+  rmtWait = 0;
+}
+
 void eksekusiTeksPerintah(String cmd);
 bool robotTerimaLaporan(const String& cmd);
 
@@ -629,9 +662,10 @@ void prosesSerial2() {
 void eksekusiTeksPerintah(String cmd) {
   cmd.trim();
   if (cmd.length() == 0) return;
+  if (cmd.startsWith("RMT|ACK|")) { rmtOnAck(cmd); return; }
   if (robotTerimaLaporan(cmd)) return;
   if (cmd.startsWith("HISTU:")) { historyAppend('U', cmd.substring(6).c_str()); return; }
-  if (cmd.startsWith("HISTA:")) { historyAppend('A', cmd.substring(6).c_str()); return; }
+  if (cmd.startsWith("HISTA:")) { historyAppend('A', cmd.substring(6).c_str()); rmtOnAnswer(cmd.substring(6)); return; }
   if (cmd.startsWith("HISTREQ|")) {
     String rest = cmd.substring(8);
     int sep = rest.indexOf('|');
@@ -1367,10 +1401,41 @@ static String tgKondisiText() {
 }
 
 static String tgHelpText() {
-  return "MENU\n/lampu_on /lampu_off\n/kipas_on /kipas_off\n/colokan_on /colokan_off\n/colokan2_on /colokan2_off\n/mp3_on /mp3_off\n/mp3_play /mp3_mode\n/suhu /cahaya\n/kondisi /status";
+  return "MENU\n/bangun (bangunkan robot)\n/bicara <teks> (tanya Gemini)\n/ucapkan <teks> (robot membaca persis)\n/lampu_on /lampu_off\n/kipas_on /kipas_off\n/colokan_on /colokan_off\n/colokan2_on /colokan2_off\n/mp3_on /mp3_off\n/mp3_play /mp3_mode\n/suhu /cahaya\n/kondisi /status";
 }
 
 // Balasan untuk satu perintah. Mengembalikan teks balasan.
+// Kirim satu perintah ke robot dan tunggu balasan RMT|ACK (maks. 2 kali coba). Mengembalikan kode, "" jika robot diam.
+static String rmtKirim(const char* tipe, String teks) {
+  teks.replace("\r", " "); teks.replace("\n", " ");
+  String bersih;
+  for (unsigned i = 0; i < teks.length() && bersih.length() < 300; ++i) {
+    unsigned char ch = (unsigned char)teks[i];
+    if (ch >= 0x20 && ch != 0x7F) bersih += (char)ch;
+  }
+  while (bersih.length() && (((unsigned char)bersih[bersih.length() - 1]) & 0xC0) == 0x80) bersih.remove(bersih.length() - 1);
+  bersih.trim();
+  if (rmtNextId == 0) rmtNextId = 100000UL + (esp_random() % 800000UL);
+  uint32_t id = rmtNextId++;
+  rmtAckId = 0;
+  for (int coba = 0; coba < 2; ++coba) {
+    Serial2.print("RMT|"); Serial2.print(tipe); Serial2.print('|'); Serial2.print((unsigned long)id);
+    if (bersih.length()) { Serial2.print('|'); Serial2.print(bersih); }
+    Serial2.println();
+    unsigned long t0 = millis();
+    while (millis() - t0 < 2500UL) {
+      prosesSerial2();
+      if (rmtAckId == id) return rmtAckCode;
+      delay(20);
+    }
+  }
+  return "";
+}
+
+static String rmtBalasanDiam() {
+  return "Robot tidak menjawab. Cek kabel robot-DevKit, dan pastikan program robot sudah diperbarui (OTA).";
+}
+
 static String tgCommandReply(String text, bool* showMenu) {
   text.trim();
   String cmd = text;
@@ -1380,6 +1445,26 @@ static String tgCommandReply(String text, bool* showMenu) {
   if (at > 0) cmd = cmd.substring(0, at);
   cmd.toLowerCase();
   if (cmd == "/start" || cmd == "/menu" || cmd == "/bantuan" || cmd == "/help") { *showMenu = true; return tgHelpText(); }
+  // --- bangunkan robot / bicara dengan Gemini lewat robot ---
+  if (cmd == "/bangun") {
+    String k = rmtKirim("WAKE", "");
+    if (k == "") return rmtBalasanDiam();
+    if (k == "aktif") return "Robot sudah bangun.";
+    return "Robot dibangunkan. Gemini tersambung dalam 2-4 detik.";
+  }
+  if (cmd == "/bicara" || cmd == "/ucapkan") {
+    String isi = (sp > 0) ? text.substring(sp + 1) : String("");
+    isi.trim();
+    if (isi.length() == 0) return "Tulis kalimatnya dulu.";
+    String k = rmtKirim(cmd == "/bicara" ? "SAY" : "READ", isi);
+    if (k == "") return rmtBalasanDiam();
+    rmtWait = 1;
+    rmtWaitUntil = millis() + 90000UL;
+    rmtWaitN = rcCurN;
+    rmtWaitQ = isi;
+    rmtAnswerReady = false;
+    return "Pesan diterima robot. Jawabannya muncul di kotak Percakapan.";
+  }
   // --- sama seperti tombol di halaman lokal DevKit ---
   if (cmd == "/r1") { setRelay(1, !statusRelay1); return String("Colokan: ") + tgOnOff(statusRelay1); }
   if (cmd == "/r2") { setRelay(2, !statusRelay2); return String("Colokan panjang: ") + tgOnOff(statusRelay2); }
@@ -1529,8 +1614,25 @@ static bool rcPushState() {
   return rcRequest("PUT", "state", body, out);
 }
 
+// Jawaban Gemini untuk pesan dari web: simpan di node "chat" supaya halaman web bisa menampilkannya.
+static void rcPushChat() {
+  if (rmtWait != 0 && (long)(millis() - rmtWaitUntil) >= 0) {
+    rmtAnswerText = "(Belum ada jawaban dari robot. Mungkin Gemini belum menjawab.)";
+    rmtAnswerReady = true;
+    rmtWait = 0;
+  }
+  if (!rmtAnswerReady) return;
+  rmtAnswerReady = false;
+  String body = String("{\"n\":") + (rmtWaitN.length() ? rmtWaitN : String("0")) +
+                ",\"q\":\"" + tgJsonEscape(rmtWaitQ) + "\",\"a\":\"" + tgJsonEscape(rmtAnswerText) +
+                "\",\"t\":\"" + ambilWaktu() + "\"}";
+  String o;
+  rcRequest("PUT", "chat", body, o);
+}
+
 static void rcLoop() {
   if (!rcReady) return;
+  rcPushChat();
   unsigned long now = millis();
   if ((long)(now - rcNextPollMs) < 0) return;
   if (WiFi.status() != WL_CONNECTED) { rcNextPollMs = now + RC_POLL_MS; return; }
@@ -1553,6 +1655,7 @@ static void rcLoop() {
       rcLastN = n;
       String c = tgJsonStr(out, "c");
       bool menu = false;
+      rcCurN = n;
       String reply = tgCommandReply(c, &menu);
       bunyikanBuzzer(1, 60, 0);
       String body = String("{\"n\":") + n + ",\"r\":\"" + tgJsonEscape(reply) + "\",\"t\":\"" + ambilWaktu() + "\"}";
