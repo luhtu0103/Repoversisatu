@@ -30,6 +30,21 @@ bool uart_control_execute_sensor_command(const char *command, char *response, si
 // Returns the latest successful sensor response and clears it from the shared slot.
 const char *uart_control_take_last_sensor_response(void);
 
+// ---- Perintah jarak jauh dari DevKit (web) ----
+typedef enum { UART_REMOTE_NONE = 0, UART_REMOTE_WAKE, UART_REMOTE_SAY, UART_REMOTE_READ } uart_remote_type_t;
+typedef struct {
+    uart_remote_type_t type;
+    uint32_t id;
+    char text[320];
+} uart_remote_cmd_t;
+
+// Mulai penerima baris "RMT|..." (panggil sekali setelah uart_control_init).
+void uart_control_start_remote(void);
+// Ambil satu perintah yang menunggu. true jika ada.
+bool uart_control_take_remote(uart_remote_cmd_t *out);
+// Balas ke DevKit: RMT|ACK|<id>|<kode>.
+void uart_control_remote_ack(uint32_t id, const char *code);
+
 // Legacy text-action helper retained for compatibility.
 bool uart_control_process_action_text(const char *text);
 
