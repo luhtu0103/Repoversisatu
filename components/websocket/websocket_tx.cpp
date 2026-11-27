@@ -1,6 +1,7 @@
 #include "websocket_internal.h"
 #include "web_config.h"
 #include "esp_log.h"
+#include "cJSON.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -334,5 +335,70 @@ bool websocket_send_idle_goodbye(void)
         return false;
     }
     ESP_LOGI(TAG, "Pamit karena sepi 30 detik masuk antrean TX");
+    return true;
+}
+
+/* Pesan dari jauh (halaman web). exact=false: Gemini menjawab seperti obrolan biasa.
+ * exact=true: Gemini mengucapkan kalimat itu persis. true jika masuk antrean TX. */
+bool websocket_send_remote_text(const char *text, bool exact)
+{
+    if (!text || !text[0]) return false;
+    if (!websocket_is_connected() || !websocket_tx_queue) return false;
+
+    char msg[720];
+    char clean[340];
+    size_t j = 0;
+    for (const unsigned char *p = (const unsigned char *)text; *p && j + 1 < sizeof(clean); ++p) {
+        if (*p < 0x20 || *p == 0x7F) continue;
+        clean[j++] = (char)*p;
+    }
+    clean[j] = '\0';
+    if (!clean[0]) return false;
+    if (exact) {
+        snprintf(msg, sizeof(msg),
+            "[Pesan dari jauh] Pemilik rumah meminta kamu mengucapkan kalimat berikut persis apa adanya, "
+            "dengan suara hangat, tanpa menambah atau mengubah isinya, lalu berhenti. "
+            "Jangan menjalankan tool apa pun. Kalimat: %s", clean);
+    } else {
+        snprintf(msg, sizeof(msg),
+            "[Pesan dari jauh] Pemilik rumah mengirim pesan lewat web dari luar rumah: \"%s\". "
+            "Jawab langsung kepadanya dengan singkat (satu sampai tiga kalimat), hangat, dalam bahasa Indonesia. "
+            "Suaramu terdengar oleh orang-orang di rumah, jadi sapa pemilik rumah dengan wajar. "
+            "Kalau pesannya meminta tindakan (misalnya nyalakan lampu), kerjakan dengan tool yang ada.", clean);
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON *cc = cJSON_AddObjectToObject(root, "clientContent");
+    cJSON *turns = cJSON_AddArrayToObject(cc, "turns");
+    cJSON *turn = cJSON_CreateObject();
+    cJSON_AddStringToObject(turn, "role", "user");
+    cJSON *parts = cJSON_AddArrayToObject(turn, "parts");
+    cJSON *part = cJSON_CreateObject();
+    cJSON_AddStringToObject(part, "text", msg);
+    cJSON_AddItemToArray(parts, part);
+    cJSON_AddItemToArray(turns, turn);
+    cJSON_AddBoolToObject(cc, "turnComplete", true);
+    char *payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!payload) return false;
+
+    const size_t n = strlen(payload);
+    if (n == 0 || n > UINT16_MAX) { cJSON_free(payload); return false; }
+    uint8_t *copy = (uint8_t *)malloc(n);
+    if (!copy) { cJSON_free(payload); return false; }
+    memcpy(copy, payload, n);
+    cJSON_free(payload);
+    ws_tx_command_t cmd = {};
+    cmd.type = WS_TX_COMMAND_TEXT;
+    cmd.generation = websocket_connection_generation;
+    cmd.len = (uint16_t)n;
+    cmd.data = copy;
+    if (xQueueSend(websocket_tx_queue, &cmd, 0) != pdTRUE) {
+        websocket_set_backpressured(true);
+        free(copy);
+        ESP_LOGW(TAG, "Pesan jarak jauh ditahan: TX queue penuh");
+        return false;
+    }
+    ESP_LOGI(TAG, "Pesan jarak jauh masuk antrean TX (%s)", exact ? "persis" : "obrolan");
     return true;
 }
