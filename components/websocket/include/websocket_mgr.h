@@ -33,5 +33,8 @@ bool websocket_send_speaker_update(const char *name);
 // 2 = gagal dimulai). Gemini diberi tahu bahwa tadi baru selesai memutar radio, lalu menyapa singkat.
 bool websocket_send_radio_ended(const char *station, int reason);
 
+// Pesan dari halaman web jarak jauh. exact=false: Gemini menjawab seperti obrolan; exact=true: mengucapkan persis.
+bool websocket_send_remote_text(const char *text, bool exact);
+
 // Sepi 30 detik: minta Gemini pamit singkat sebelum robot kembali standby. true jika terkirim ke antrean.
 bool websocket_send_idle_goodbye(void);
