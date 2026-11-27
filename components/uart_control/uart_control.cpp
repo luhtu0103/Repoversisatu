@@ -19,6 +19,16 @@ static const char *TAG = "UART_CTRL";
 
 static char last_sensor_response[SENSOR_RESPONSE_MAX_LEN];
 
+/* ---- Perintah dari jauh (web -> DevKit -> robot) ----
+ * Penerima baris "RMT|..." berjalan di task sendiri. Selama fungsi lain sedang menunggu balasan
+ * DevKit (riwayat / sensor), penerima ini diam supaya tidak mengambil balasan mereka. */
+static volatile int s_rx_busy = 0;
+static portMUX_TYPE s_remote_mux = portMUX_INITIALIZER_UNLOCKED;
+static uart_remote_cmd_t s_remote_pending = {};
+static bool s_remote_has = false;
+static uint32_t s_remote_last_id = 0;
+static char s_remote_last_code[16] = "";
+
 static bool is_sensor_command(const char *command)
 {
     return command && (strcmp(command, "cek_suhu") == 0 || strcmp(command, "cek_cahaya") == 0);
@@ -136,7 +146,7 @@ static void format_age(long age_min, char *out, size_t n)
  *                      HISTRES|ITEM|<umur_menit atau -1>|<U atau A>|<teks>\n   (diulang)
  *                      HISTRES|END\n
  */
-size_t uart_control_request_history(int count, int days_ago, char *out, size_t out_size, uint32_t timeout_ms)
+static size_t request_history_impl(int count, int days_ago, char *out, size_t out_size, uint32_t timeout_ms)
 {
     if (!out || out_size < 32) return 0;
     out[0] = '\0';
@@ -206,7 +216,7 @@ size_t uart_control_request_history(int count, int days_ago, char *out, size_t o
     return used;
 }
 
-bool uart_control_execute_sensor_command(const char *command, char *response, size_t response_len, uint32_t timeout_ms)
+static bool sensor_command_impl(const char *command, char *response, size_t response_len, uint32_t timeout_ms)
 {
     if (response && response_len > 0) response[0] = '\0';
     if (!is_sensor_command(command) || !response || response_len < 2) return false;
@@ -271,6 +281,22 @@ bool uart_control_execute_sensor_command(const char *command, char *response, si
     response[idx] = '\0';
     ESP_LOGW(TAG, "Timeout menunggu respons sensor: %s", command);
     return false;
+}
+
+size_t uart_control_request_history(int count, int days_ago, char *out, size_t out_size, uint32_t timeout_ms)
+{
+    __atomic_fetch_add(&s_rx_busy, 1, __ATOMIC_SEQ_CST);
+    const size_t r = request_history_impl(count, days_ago, out, out_size, timeout_ms);
+    __atomic_fetch_sub(&s_rx_busy, 1, __ATOMIC_SEQ_CST);
+    return r;
+}
+
+bool uart_control_execute_sensor_command(const char *command, char *response, size_t response_len, uint32_t timeout_ms)
+{
+    __atomic_fetch_add(&s_rx_busy, 1, __ATOMIC_SEQ_CST);
+    const bool r = sensor_command_impl(command, response, response_len, timeout_ms);
+    __atomic_fetch_sub(&s_rx_busy, 1, __ATOMIC_SEQ_CST);
+    return r;
 }
 
 bool uart_control_execute_command(const char *command)
@@ -349,4 +375,106 @@ int uart_control_read(char *buf, size_t max_len)
 
     buf[idx] = '\0';
     return idx > 0 ? (int)idx : -1;
+}
+
+
+/* ---------- Perintah jarak jauh ----------
+ *   DevKit -> robot : RMT|WAKE|<id>
+ *                     RMT|SAY|<id>|<teks>    (Gemini menjawab seperti obrolan biasa)
+ *                     RMT|READ|<id>|<teks>   (Gemini mengucapkan teks persis)
+ *   robot  -> DevKit : RMT|ACK|<id>|<kode>   (bangun, aktif, terima, terkirim, gagal)
+ */
+static void remote_handle_line(char *line)
+{
+    if (strncmp(line, "RMT|", 4) != 0) return;
+    char *type = line + 4;
+    char *p = strchr(type, '|');
+    if (!p) return;
+    *p++ = '\0';
+    char *idstr = p;
+    char *text = strchr(p, '|');
+    if (text) *text++ = '\0';
+    const uint32_t id = (uint32_t)strtoul(idstr, NULL, 10);
+    if (id == 0) return;
+
+    uart_remote_type_t t = UART_REMOTE_NONE;
+    if (strcmp(type, "WAKE") == 0) t = UART_REMOTE_WAKE;
+    else if (strcmp(type, "SAY") == 0) t = UART_REMOTE_SAY;
+    else if (strcmp(type, "READ") == 0) t = UART_REMOTE_READ;
+    if (t == UART_REMOTE_NONE) return;
+    if (t != UART_REMOTE_WAKE && (!text || !text[0])) return;
+
+    if (id == s_remote_last_id) {            /* DevKit mengirim ulang: jangan jalankan dua kali */
+        if (s_remote_last_code[0]) uart_control_remote_ack(id, s_remote_last_code);
+        return;
+    }
+    uart_remote_cmd_t c = {};
+    c.type = t;
+    c.id = id;
+    if (text) strlcpy(c.text, text, sizeof(c.text));
+    portENTER_CRITICAL(&s_remote_mux);
+    s_remote_pending = c;
+    s_remote_has = true;
+    s_remote_last_id = id;
+    s_remote_last_code[0] = '\0';
+    portEXIT_CRITICAL(&s_remote_mux);
+    ESP_LOGI(TAG, "Perintah jarak jauh diterima: %s id=%u", type, (unsigned)id);
+}
+
+static void remote_rx_task(void *arg)
+{
+    (void)arg;
+    static char line[400];
+    size_t len = 0;
+    bool overflow = false;
+    for (;;) {
+        if (s_rx_busy > 0) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
+        uint8_t chunk[64];
+        const int got = uart_read_bytes(UART_CONTROL_NUM, chunk, sizeof(chunk), 0);
+        if (got <= 0) { vTaskDelay(pdMS_TO_TICKS(30)); continue; }
+        for (int i = 0; i < got; ++i) {
+            const char c = (char)chunk[i];
+            if (c == '\r') continue;
+            if (c != '\n') {
+                if (len < sizeof(line) - 1) line[len++] = c; else overflow = true;
+                continue;
+            }
+            line[len] = '\0';
+            const bool bad = overflow;
+            len = 0;
+            overflow = false;
+            if (!bad && line[0]) remote_handle_line(line);
+        }
+    }
+}
+
+void uart_control_start_remote(void)
+{
+    static bool started = false;
+    if (started) return;
+    if (xTaskCreate(remote_rx_task, "uart_rmt", 4096, NULL, 3, NULL) == pdPASS) started = true;
+    else ESP_LOGW(TAG, "Penerima perintah jarak jauh gagal dibuat");
+}
+
+bool uart_control_take_remote(uart_remote_cmd_t *out)
+{
+    if (!out) return false;
+    bool has = false;
+    portENTER_CRITICAL(&s_remote_mux);
+    if (s_remote_has) {
+        *out = s_remote_pending;
+        s_remote_has = false;
+        has = true;
+    }
+    portEXIT_CRITICAL(&s_remote_mux);
+    return has;
+}
+
+void uart_control_remote_ack(uint32_t id, const char *code)
+{
+    if (!code || !code[0] || id == 0) return;
+    if (id == s_remote_last_id) strlcpy(s_remote_last_code, code, sizeof(s_remote_last_code));
+    char line[48];
+    snprintf(line, sizeof(line), "RMT|ACK|%u|%s", (unsigned)id, code);
+    uart_control_send(line);
 }
