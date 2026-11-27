@@ -91,7 +91,16 @@ STAT : Belum diatur</div>
 </div>
 <div class="panel"><h3>Kondisi</h3><pre id="kond">-</pre><div class="info" id="age"></div></div>
 <div class="panel"><h3>Pemberitahuan</h3><pre id="alrt">-</pre></div>
-<div class="panel"><h3>Robot bicara</h3><div class="info">Menyusul (butuh pembaruan robot).</div></div>
+<div class="panel"><h3>Robot bicara</h3>
+  <button class="btn-relay" data-cmd="/bangun" style="background:#7c3aed;margin-bottom:8px">BANGUNKAN ROBOT</button>
+  <input id="inSay" type="text" maxlength="280" placeholder="Ketik pesan untuk robot" autocomplete="off">
+  <div class="grid-2">
+    <button class="btn-relay" id="btnAsk" type="button" style="background:#2563eb">TANYA GEMINI</button>
+    <button class="btn-relay" id="btnRead" type="button" style="background:#0f766e">UCAPKAN PERSIS</button>
+  </div>
+  <div class="info">Suara terdengar oleh orang di rumah. Jangan kirim hal rahasia.</div>
+</div>
+<div class="panel"><h3>Percakapan</h3><pre id="chat">-</pre></div>
 
 <script>
 (function () {
@@ -137,11 +146,35 @@ STAT : Belum diatur</div>
       }
       if (got) stat(got.r);
       else stat("DevKit belum membalas (mati / Wi-Fi putus?)");
+      if (got && /^\/(bicara|ucapkan) /.test(cmd) && got.r.indexOf("diterima") >= 0) waitChat(n);
       refresh();
     } catch (e) {
       stat("Gagal: " + e.message + " (cek alamat, kunci, Rules)");
     } finally { busy = false; }
   }
+
+  var chatWait = 0;
+  async function waitChat(n) {
+    var my = ++chatWait;
+    $("chat").textContent = "Pesan terkirim. Menunggu jawaban robot ...";
+    var t0 = Date.now();
+    while (Date.now() - t0 < 100000 && my === chatWait) {
+      await new Promise(function (r) { setTimeout(r, 2000); });
+      try {
+        var c = await api("chat");
+        if (c && c.n === n) { showChat(c); return; }
+      } catch (e) {}
+    }
+    if (my === chatWait) $("chat").textContent = "Belum ada jawaban. Coba lagi sebentar.";
+  }
+  function showChat(c) { $("chat").textContent = "Kamu (" + (c.t || "") + "): " + (c.q || "") + "\n\nRobot: " + (c.a || ""); }
+  function sendText(prefix) {
+    var t = $("inSay").value.trim();
+    if (!t) { stat("Tulis pesannya dulu"); return; }
+    send(prefix + " " + t).then(function () { $("inSay").value = ""; });
+  }
+  $("btnAsk").addEventListener("click", function () { sendText("/bicara"); });
+  $("btnRead").addEventListener("click", function () { sendText("/ucapkan"); });
 
   var RELAYS = [["b_r1", "colokan"], ["b_r2", "colokan panjang"], ["b_r3", "saklar lampu"], ["b_r4", "mp3 player"]];
   function drawRelays(r) {
