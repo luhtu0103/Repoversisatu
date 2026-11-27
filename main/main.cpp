@@ -220,6 +220,15 @@ static bool alarm_prompt_pending = false;
 static alarm_info_t alarm_prompt_info = {};
 static bool alarm_prompt_standby_after = true;   // kembali standby setelah alarm bicara (kecuali sedang ngobrol)
 
+/* Perintah dari jauh (halaman web -> DevKit -> robot): bangunkan robot / kirim pesan ke Gemini. */
+static bool remote_start_pending = false;
+static bool remote_say_pending = false;
+static bool remote_say_exact = false;
+static bool remote_standby_after = false;   // robot tadi tidur: setelah menjawab, tidur lagi (tanpa pamit)
+static uint32_t remote_say_id = 0;
+static int64_t remote_say_since_us = 0;
+static char remote_say_text[320] = {};
+
 /* Setelah radio streaming selesai, Gemini diberi tahu bahwa tadi baru memutar radio. */
 static char radio_note_name[48] = {};
 static int radio_note_reason = 0;
@@ -584,6 +593,50 @@ static void audio_task(void *arg)
     constexpr int64_t STANDBY_PLAYBACK_DRAIN_TIMEOUT_US = 60000000LL;
 
     while (1) {
+        /* ---- Perintah dari jauh ---- */
+        {
+            uart_remote_cmd_t rc = {};
+            if (uart_control_take_remote(&rc)) {
+                display_status("Perintah dari jauh");
+                if (rc.type == UART_REMOTE_WAKE) {
+                    if (assistant_active) {
+                        uart_control_remote_ack(rc.id, "aktif");
+                    } else {
+                        remote_start_pending = true;
+                        uart_control_remote_ack(rc.id, "bangun");
+                    }
+                } else {
+                    strlcpy(remote_say_text, rc.text, sizeof(remote_say_text));
+                    remote_say_exact = (rc.type == UART_REMOTE_READ);
+                    remote_say_id = rc.id;
+                    remote_say_since_us = esp_timer_get_time();
+                    remote_standby_after = !assistant_active;
+                    remote_say_pending = true;
+                    if (!assistant_active) remote_start_pending = true;
+                    uart_control_remote_ack(rc.id, "terima");
+                }
+            }
+            if (remote_start_pending) {
+                if (assistant_active) {
+                    remote_start_pending = false;
+                } else if (radio_is_active()) {
+                    radio_stop();   // radio berhenti dulu, sesi dimulai begitu radio selesai
+                } else if (!websocket_lifecycle_busy()) {
+                    remote_start_pending = false;
+                    ESP_LOGW(TAG, "Dibangunkan dari jauh; memulai Gemini");
+                    assistant_active = true;
+                    disconnect_wait_start_us = 0;
+                    face_set_state(FACE_THINKING);
+                    websocket_app_start();
+                }
+            }
+            if (remote_say_pending && esp_timer_get_time() - remote_say_since_us > 40LL * 1000000LL) {
+                remote_say_pending = false;
+                remote_start_pending = false;
+                uart_control_remote_ack(remote_say_id, "gagal");
+                ESP_LOGW(TAG, "Pesan jarak jauh dibatalkan: sesi Gemini tidak siap dalam 40 detik");
+            }
+        }
         /* Satu alarm per kali: jangan memicu alarm berikutnya sebelum prompt sebelumnya terkirim. */
         if (!alarm_prompt_pending && alarm_poll_due_internal()) {
             alarm_info_t fired = {};
@@ -943,6 +996,18 @@ static void audio_task(void *arg)
         }
         if (radio_note_pending && websocket_send_radio_ended(radio_note_name, radio_note_reason))
             radio_note_pending = false;
+        if (remote_say_pending && websocket_is_connected()) {
+            if (websocket_send_remote_text(remote_say_text, remote_say_exact)) {
+                remote_say_pending = false;
+                uart_control_remote_ack(remote_say_id, "terkirim");
+                ESP_LOGI(TAG, "Pesan jarak jauh terkirim ke Gemini");
+                if (remote_standby_after) {
+                    (void)websocket_take_audio_playback_complete();   // buang tanda lama
+                    standby_pending = true;
+                    standby_requested_us = esp_timer_get_time();
+                }
+            }
+        }
         if (alarm_prompt_pending && websocket_is_connected()) {
             if (websocket_send_alarm_prompt(alarm_prompt_info.hour, alarm_prompt_info.minute,
                                             alarm_prompt_info.label, alarm_prompt_info.kind)) {
@@ -961,7 +1026,7 @@ static void audio_task(void *arg)
          * Dihitung dari giliran Gemini terakhir. Obrolan keluarga yang tidak ditujukan ke robot tidak menahan timer. */
         {
             const bool idle_busy = audio_turn_active || audio_turn_complete_pending || websocket_mic_uplink_paused ||
-                                   standby_pending || alarm_prompt_pending || radio_note_pending ||
+                                   standby_pending || alarm_prompt_pending || radio_note_pending || remote_say_pending ||
                                    radio_has_pending() || radio_is_active() || !setup_complete;
             if (idle_busy) {
                 idle_since_us = 0;
@@ -1120,6 +1185,7 @@ extern "C" void app_main()
     gpio_set_direction(BOOT_BUTTON_GPIO, GPIO_MODE_INPUT); gpio_set_pull_mode(BOOT_BUTTON_GPIO, GPIO_PULLUP_ONLY); ESP_LOGI(TAG, "Tombol boot siap di GPIO0");
     if (xTaskCreate(boot_button_task, "boot_btn", 3072, NULL, 3, NULL) != pdPASS) ESP_LOGW(TAG, "boot_button_task gagal dibuat; tekan 3x tidak aktif");
     uart_control_init();
+    uart_control_start_remote();
     if (!touch_emotion_start()) ESP_LOGE(TAG, "Sensor sentuh gagal dimulai; fitur sentuh dinonaktifkan");
 
     display_status("Menghubungkan WiFi...");
