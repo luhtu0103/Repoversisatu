@@ -627,10 +627,17 @@ bool build_gemini_setup(char **output, size_t *output_len)
     cJSON *realtime = cJSON_AddObjectToObject(setup, "realtimeInputConfig");
     cJSON *aad = cJSON_AddObjectToObject(realtime, "automaticActivityDetection");
     cJSON_AddBoolToObject(aad, "disabled", false);
-    /* LOW: rumah ramai (banyak orang ngobrol, TV). Suara pelan/jauh lebih jarang dianggap perintah.
-     * Kalau terlalu sulit ditangkap, ubah kembali ke START_SENSITIVITY_HIGH.
-     * prefixPadding 300 ms menjaga awal kata. */
+    /* Gemini menyelesaikan jawabannya dulu; suara latar (TV, obrolan) tidak membatalkannya. */
+    cJSON_AddStringToObject(realtime, "activityHandling", "NO_INTERRUPTION");
+    /* Kepekaan menangkap suara. HIGH = mudah menangkap ucapan (lebih stabil mendengarkan).
+     * LOW = lebih tahan suara ramai, tapi sering kelewatan ucapan pelan/jauh.
+     * Kalau robot terlalu sering menjawab obrolan orang lain, ubah ke 0 (LOW). */
+#define AAD_START_HIGH 1
+#if AAD_START_HIGH
+    cJSON_AddStringToObject(aad, "startOfSpeechSensitivity", "START_SENSITIVITY_HIGH");
+#else
     cJSON_AddStringToObject(aad, "startOfSpeechSensitivity", "START_SENSITIVITY_LOW");
+#endif
     cJSON_AddNumberToObject(aad, "prefixPaddingMs", 300);
     cJSON_AddStringToObject(aad, "endOfSpeechSensitivity", "END_SENSITIVITY_LOW");
     cJSON_AddNumberToObject(aad, "silenceDurationMs", 700);
